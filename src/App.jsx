@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TASK, WORDS } from "./data.js";
-import { getLabel, getMetrics, loadSession, newSession, saveSession } from "./session.js";
+import { enqueueMeaningReview, getLabel, getMetrics, loadSession, newSession, saveSession } from "./session.js";
 import { BUILD_TASK, BUILD_WORDS } from "./wordBuildData.js";
-import { getBuildMetrics, loadBuildSession, newBuildSession, saveBuildSession } from "./wordBuildSession.js";
+import { enqueueBuildReview, getBuildMetrics, loadBuildSession, newBuildSession, saveBuildSession } from "./wordBuildSession.js";
 
 const LABELS = {
   fluent: { text: "熟练掌握", tone: "success" },
@@ -84,14 +84,11 @@ function App() {
 
   const beginTask = (reset = false) => {
     const base = reset ? newSession() : session;
-    const firstOpenIndex = reset
-      ? 0
-      : WORDS.findIndex((word) => !base.results[word.id].mastered);
     const updated = {
       ...base,
       status: "in_progress",
       startedAt: base.startedAt || new Date().toISOString(),
-      currentIndex: firstOpenIndex === -1 ? 0 : firstOpenIndex,
+      currentIndex: reset ? 0 : base.currentIndex,
     };
     setSession(updated);
     setSelectedTask("meaning");
@@ -107,14 +104,11 @@ function App() {
 
   const beginBuildTask = (reset = false) => {
     const base = reset ? newBuildSession() : buildSession;
-    const firstOpenIndex = reset
-      ? 0
-      : BUILD_WORDS.findIndex((word) => !base.results[word.id].completed);
     const updated = {
       ...base,
       status: "in_progress",
       startedAt: base.startedAt || new Date().toISOString(),
-      currentIndex: firstOpenIndex === -1 ? 0 : firstOpenIndex,
+      currentIndex: reset ? 0 : base.currentIndex,
     };
     setBuildSession(updated);
     setSelectedTask("build");
@@ -332,7 +326,7 @@ function BriefingScreen({ session, onBack, onStart }) {
         <div className="rules">
           <h3>练习规则</h3>
           <p><Icon name="check" /> 可以重复播放发音，重听会帮助你确认声音。</p>
-          <p><Icon name="check" /> 首次答错会自动重播；再次答错才展示完整解析。</p>
+          <p><Icon name="check" /> 没有首遍答对的词会在本轮末尾自动再次出现，最多练习三遍。</p>
           <p><Icon name="check" /> 报告会分别记录首答表现和最终掌握情况。</p>
         </div>
         <button className="audio-check" onClick={testAudio}><Icon name="volume" />试听发音 {audioStatus === "playing" ? "播放中..." : tested ? "再次试听" : ""}</button>
@@ -345,33 +339,32 @@ function BriefingScreen({ session, onBack, onStart }) {
 
 function PracticeScreen({ session, setSession, onExit, onCompleted }) {
   const index = session.currentIndex;
-  const word = WORDS[index];
+  const entry = session.queue[index];
+  const word = WORDS.find((item) => item.id === entry.wordId);
   const result = session.results[word.id];
-  const [mode, setMode] = useState(result.firstCorrect === false ? "review" : "first");
   const [choice, setChoice] = useState(null);
   const [feedback, setFeedback] = useState(null);
-  const [retryPrompt, setRetryPrompt] = useState(false);
   const [audioStatus, setAudioStatus] = useState("ready");
   const [leaveOpen, setLeaveOpen] = useState(false);
   const audioKey = useRef("");
-  const options = useMemo(() => (mode === "review" ? rotateOptions(word.options, result.reviewAttempts + 1) : word.options), [mode, result.reviewAttempts, word]);
+  const options = useMemo(() => (entry.round > 1 ? rotateOptions(word.options, entry.round - 1) : word.options), [entry.round, word]);
 
   useEffect(() => {
-    const key = `${word.id}-${mode}`;
+    const key = `${word.id}-${entry.round}`;
     if (audioKey.current !== key) {
       audioKey.current = key;
       speakWord(word, setAudioStatus);
     }
     setChoice(null);
     setFeedback(null);
-  }, [word, mode]);
+  }, [entry.round, word]);
 
   const replay = () => {
     if (audioStatus === "error") setAudioStatus("ready");
     speakWord(word, setAudioStatus);
     setSession((current) => {
       const currentResult = current.results[word.id];
-      const field = mode === "first" && !feedback ? "firstReplays" : "reviewReplays";
+      const field = entry.round === 1 && !feedback ? "firstReplays" : "reviewReplays";
       return { ...current, results: { ...current.results, [word.id]: { ...currentResult, [field]: currentResult[field] + 1 } } };
     });
   };
@@ -379,53 +372,37 @@ function PracticeScreen({ session, setSession, onExit, onCompleted }) {
   const submit = () => {
     if (!choice || audioStatus === "error") return;
     const correct = choice === word.meaning;
-    if (mode === "first") {
-      setSession((current) => ({
+    setSession((current) => {
+      const currentResult = current.results[word.id];
+      return {
         ...current,
+        queue: enqueueMeaningReview(current.queue, entry, correct),
         results: {
           ...current.results,
-          [word.id]: { ...current.results[word.id], firstChoice: choice, firstCorrect: correct, mastered: correct },
+          [word.id]: {
+            ...currentResult,
+            firstChoice: entry.round === 1 ? choice : currentResult.firstChoice,
+            firstCorrect: entry.round === 1 ? correct : currentResult.firstCorrect,
+            reviewAttempts: entry.round > 1 ? currentResult.reviewAttempts + 1 : currentResult.reviewAttempts,
+            mastered: correct,
+            studyRounds: [...currentResult.studyRounds, { round: entry.round, correct, choice }],
+          },
         },
-      }));
-      if (!correct) {
-        setMode("review");
-        setChoice(null);
-        setRetryPrompt(true);
-        return;
-      }
-    } else {
-      setSession((current) => ({
-        ...current,
-        results: {
-          ...current.results,
-          [word.id]: { ...current.results[word.id], reviewAttempts: current.results[word.id].reviewAttempts + 1, mastered: correct },
-        },
-      }));
-    }
-    setRetryPrompt(false);
+      };
+    });
     setFeedback(correct ? "correct" : "incorrect");
     if (!correct) speakWord(word, setAudioStatus);
   };
 
-  const retry = () => {
-    setMode("review");
-    setChoice(null);
-    setFeedback(null);
-    setRetryPrompt(false);
-    speakWord(word, setAudioStatus);
-  };
-
   const next = () => {
-    if (index === WORDS.length - 1) {
+    if (index === session.queue.length - 1) {
       setSession((current) => ({ ...current, status: "completed", completedAt: new Date().toISOString() }));
       onCompleted();
       return;
     }
     setSession((current) => ({ ...current, currentIndex: index + 1 }));
-    setMode("first");
     setChoice(null);
     setFeedback(null);
-    setRetryPrompt(false);
     audioKey.current = "";
   };
 
@@ -435,12 +412,12 @@ function PracticeScreen({ session, setSession, onExit, onCompleted }) {
         <div className="practice-top">
           <button className="quiet-button" onClick={() => setLeaveOpen(true)}><Icon name="back" />暂离</button>
           <div className="progress-area">
-            <span>{index + 1} / {WORDS.length}</span>
-            <div className="progress"><i style={{ width: `${((index + 1) / WORDS.length) * 100}%` }} /></div>
+            <span>{index + 1} / {session.queue.length}</span>
+            <div className="progress"><i style={{ width: `${((index + 1) / session.queue.length) * 100}%` }} /></div>
           </div>
         </div>
         <div className="question-panel">
-          {mode === "review" ? <p className="mode-label">巩固练习</p> : null}
+          {entry.round > 1 ? <p className="mode-label">循环巩固 · 第 {entry.round} 遍</p> : null}
           <h1>听发音，选择正确意思</h1>
           <button className={`play-circle ${audioStatus === "playing" ? "speaking" : ""}`} onClick={replay} aria-label="播放单词发音">
             <Icon name="volume" />
@@ -464,12 +441,11 @@ function PracticeScreen({ session, setSession, onExit, onCompleted }) {
               );
             })}
           </div>
-          {retryPrompt ? <FirstRetryNotice /> : null}
           {!feedback ? <button className="button primary submit" disabled={!choice || audioStatus === "error"} onClick={submit}>确认</button> : null}
-          {feedback ? <QuestionFeedback word={word} result={session.results[word.id]} correct={feedback === "correct"} mode={mode} onReplay={replay} onContinue={feedback === "correct" ? next : retry} /> : null}
+          {feedback ? <QuestionFeedback word={word} result={session.results[word.id]} correct={feedback === "correct"} round={entry.round} onReplay={replay} onContinue={next} /> : null}
         </div>
       </section>
-      <PracticeAside mode={mode} result={result} />
+      <PracticeAside round={entry.round} result={result} />
       {leaveOpen ? <ExitDialog onStay={() => setLeaveOpen(false)} onLeave={onExit} /> : null}
     </main>
   );
@@ -487,7 +463,7 @@ function FirstRetryNotice() {
   );
 }
 
-function PracticeAside({ mode, result }) {
+function PracticeAside({ round, result }) {
   return (
     <aside className="practice-aside">
       <h2>本次目标</h2>
@@ -498,26 +474,26 @@ function PracticeAside({ mode, result }) {
       </div>
       <div className="status-card">
         <h3>当前单词</h3>
-        <p>{mode === "review" ? "正在重新巩固" : "正在首次作答"}</p>
+        <p>{round > 1 ? `正在进行第 ${round} 遍巩固` : "正在首次作答"}</p>
         <span>主动重听 {result.firstReplays + result.reviewReplays} 次</span>
       </div>
     </aside>
   );
 }
 
-function QuestionFeedback({ word, result, correct, mode, onReplay, onContinue }) {
+function QuestionFeedback({ word, result, correct, round, onReplay, onContinue }) {
   const label = correct ? LABELS[getLabel(result)] : null;
   return (
     <div className={`feedback ${correct ? "positive" : "negative"}`}>
-      <h2>{correct ? (mode === "review" ? "已重新掌握这个词" : "正确，你听出了这个单词。") : `这个词的意思是：${word.meaning}`}</h2>
+      <h2>{correct ? (round > 1 ? "已重新掌握这个词" : "正确，你听出了这个单词。") : `这个词的意思是：${word.meaning}`}</h2>
       <div className="word-reveal">
         <strong>{word.word}</strong><span>{word.phonetic}</span><b>{word.meaning}</b>
       </div>
-      {!correct ? <p>{word.tip} 再听一次，把它记住。</p> : null}
+      {!correct ? <p>{word.tip} {round < 3 ? "这个词会在本轮后面再次出现。" : "本轮已达到三遍练习上限。"}</p> : null}
       {label ? <span className={`tag ${label.tone}`}>{label.text}</span> : null}
       <div className="feedback-actions">
         <button className="button secondary" onClick={onReplay}><Icon name="volume" />再听一次</button>
-        <button className="button primary" onClick={onContinue}>{correct ? "下一题" : "我记住了，重新选择"}</button>
+        <button className="button primary" onClick={onContinue}>下一题</button>
       </div>
     </div>
   );
@@ -570,7 +546,7 @@ function StudentReport({ session, metrics, onFocus, onRestart, onTeacher }) {
         <Metric value={`${metrics.masteryRate}%`} label="最终掌握率" tone="success" />
         <Metric value={`${metrics.focus.length} 词`} label="重点巩固" tone="warning" />
       </section>
-      <p className="report-message">你通过复习掌握了全部单词。{metrics.reviewed ? `有 ${metrics.reviewed} 个单词是听错后重新学会的，建议今天再练一次。` : "本次首答状态稳定，继续保持。"}</p>
+      <p className="report-message">{metrics.mastered === WORDS.length ? "你通过本轮练习掌握了全部单词。" : `本轮结束后仍有 ${WORDS.length - metrics.mastered} 个词需要继续巩固。`}{metrics.reviewed ? ` 有 ${metrics.reviewed} 个单词是在循环复习后掌握的。` : " 本次首答状态稳定，继续保持。"}</p>
       <section className="group-list">
         {GROUPS.map((group) => {
           const words = WORDS.filter((word) => getLabel(session.results[word.id]) === group.id);
@@ -762,7 +738,7 @@ function BuildBriefingScreen({ buildSession, onBack, onStart }) {
           <h3>练习规则</h3>
           <p><Icon name="check" /> 可拆词会提供词根与词缀模块，按构词顺序组合。</p>
           <p><Icon name="check" /> 不适合拆解的词直接键盘拼写，输满后自动判断。</p>
-          <p><Icon name="check" /> 完成英文后进入四选一释义，报告分别记录两步表现。</p>
+          <p><Icon name="check" /> 任一步出现错误的词会排到本轮末尾再练，最多出现三遍。</p>
         </div>
         <button className="audio-check" onClick={testAudio}><Icon name="volume" />试听发音 {audioStatus === "playing" ? "播放中..." : ""}</button>
         {audioStatus === "error" ? <p className="error-note">无法播放发音，请检查浏览器音频权限后重试。</p> : null}
@@ -774,12 +750,16 @@ function BuildBriefingScreen({ buildSession, onBack, onStart }) {
 
 function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
   const index = session.currentIndex;
-  const word = BUILD_WORDS[index];
+  const entry = session.queue[index];
+  const word = BUILD_WORDS.find((item) => item.id === entry.wordId);
   const result = session.results[word.id];
   const [selectedParts, setSelectedParts] = useState([]);
   const [wrongIndexes, setWrongIndexes] = useState([]);
   const [spelling, setSpelling] = useState("");
   const [spellingError, setSpellingError] = useState(false);
+  const [formed, setFormed] = useState(false);
+  const [wordCompleted, setWordCompleted] = useState(false);
+  const [roundHadError, setRoundHadError] = useState(false);
   const [audioStatus, setAudioStatus] = useState("ready");
   const [leaveOpen, setLeaveOpen] = useState(false);
   const audioKey = useRef("");
@@ -790,26 +770,29 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
     setWrongIndexes([]);
     setSpelling("");
     setSpellingError(false);
-  }, [word]);
+    setFormed(false);
+    setWordCompleted(false);
+    setRoundHadError(false);
+  }, [entry.round, word]);
 
   useEffect(() => {
-    const phase = result.completed ? "completed" : result.formed ? "meaning" : "formation";
-    const key = `${word.id}-${phase}`;
+    const phase = wordCompleted ? "completed" : formed ? "meaning" : "formation";
+    const key = `${word.id}-${entry.round}-${phase}`;
     if (audioKey.current !== key) {
       audioKey.current = key;
       speakWord(word, setAudioStatus);
     }
-  }, [result.completed, result.formed, word]);
+  }, [entry.round, formed, word, wordCompleted]);
 
   useEffect(() => {
-    if (!result.formed && word.responseMode === "spell") {
+    if (!formed && word.responseMode === "spell") {
       spellingRef.current?.focus();
     }
-  }, [result.formed, word.responseMode]);
+  }, [formed, word.responseMode]);
 
   const replay = () => {
     speakWord(word, setAudioStatus);
-    if (!result.formed && word.responseMode === "spell") {
+    if (!formed && word.responseMode === "spell") {
       requestAnimationFrame(() => {
         spellingRef.current?.focus();
         if (spellingError) spellingRef.current?.select();
@@ -834,9 +817,8 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
           [word.id]: {
             ...currentResult,
             formationAttempts: currentResult.formationAttempts + 1,
-            formationFirstCorrect: currentResult.formationFirstCorrect === null ? correct : currentResult.formationFirstCorrect,
+            formationFirstCorrect: entry.round === 1 && currentResult.formationFirstCorrect === null ? correct : currentResult.formationFirstCorrect,
             wrongSpellings: wrongSpelling ? [...currentResult.wrongSpellings, wrongSpelling] : currentResult.wrongSpellings,
-            formed: correct,
           },
         },
       };
@@ -852,10 +834,12 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
     const incorrect = next.flatMap((selected, position) => selected === word.parts[position] ? [] : [position]);
     if (incorrect.length) {
       setWrongIndexes(incorrect);
+      setRoundHadError(true);
       saveFormationAttempt(false);
       return;
     }
     saveFormationAttempt(true);
+    setFormed(true);
   };
 
   const changeSpelling = (event) => {
@@ -865,9 +849,11 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
     if (value.length !== word.word.length) return;
     if (value === word.word) {
       saveFormationAttempt(true);
+      setFormed(true);
       return;
     }
     saveFormationAttempt(false, value);
+    setRoundHadError(true);
     setSpellingError(true);
     requestAnimationFrame(() => {
       spellingRef.current?.focus();
@@ -877,31 +863,40 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
 
   const submitMeaning = (choice) => {
     const correct = choice === word.meaning;
+    const needsReview = roundHadError || !correct;
     setSession((current) => {
       const currentResult = current.results[word.id];
+      const willReview = needsReview && entry.round < 3;
       return {
         ...current,
+        queue: correct ? enqueueBuildReview(current.queue, entry, needsReview) : current.queue,
         results: {
           ...current.results,
           [word.id]: {
             ...currentResult,
             meaningAttempts: currentResult.meaningAttempts + 1,
-            meaningFirstCorrect: currentResult.meaningFirstCorrect === null ? correct : currentResult.meaningFirstCorrect,
+            meaningFirstCorrect: entry.round === 1 && currentResult.meaningFirstCorrect === null ? correct : currentResult.meaningFirstCorrect,
             wrongMeanings: correct || currentResult.wrongMeanings.includes(choice)
               ? currentResult.wrongMeanings
               : [...currentResult.wrongMeanings, choice],
-            completed: correct,
+            completed: correct && !willReview,
+            studyRounds: correct
+              ? [...currentResult.studyRounds, { round: entry.round, hadError: needsReview }]
+              : currentResult.studyRounds,
           },
         },
       };
     });
     if (!correct) {
+      setRoundHadError(true);
       speakWord(word, setAudioStatus);
+      return;
     }
+    setWordCompleted(true);
   };
 
   const next = () => {
-    if (index === BUILD_WORDS.length - 1) {
+    if (index === session.queue.length - 1) {
       setSession((current) => ({ ...current, status: "completed", completedAt: new Date().toISOString() }));
       onCompleted();
       return;
@@ -916,19 +911,19 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
         <div className="practice-top">
           <button className="quiet-button" onClick={() => setLeaveOpen(true)}><Icon name="back" />暂离</button>
           <div className="progress-area">
-            <span>{index + 1} / {BUILD_WORDS.length}</span>
-            <div className="progress"><i style={{ width: `${((index + 1) / BUILD_WORDS.length) * 100}%` }} /></div>
+            <span>{index + 1} / {session.queue.length}</span>
+            <div className="progress"><i style={{ width: `${((index + 1) / session.queue.length) * 100}%` }} /></div>
           </div>
         </div>
         <div className="question-panel build-panel">
-          <p className="mode-label">{result.completed ? "本词完成" : result.formed ? "第 2 步：理解词义" : "第 1 步：还原英文"}</p>
-          <h1>{result.completed ? "跟随发音，再记一次这个单词" : result.formed ? "选择与这个单词对应的中文释义" : word.responseMode === "build" ? "听发音，按构词顺序组合单词" : "听发音，输入完整拼写"}</h1>
+          <p className="mode-label">{wordCompleted ? "本词完成" : entry.round > 1 ? `循环巩固 · 第 ${entry.round} 遍` : formed ? "第 2 步：理解词义" : "第 1 步：还原英文"}</p>
+          <h1>{wordCompleted ? "跟随发音，再记一次这个单词" : formed ? "选择与这个单词对应的中文释义" : word.responseMode === "build" ? "听发音，按构词顺序组合单词" : "听发音，输入完整拼写"}</h1>
           <button className={`play-circle ${audioStatus === "playing" ? "speaking" : ""}`} onClick={replay} aria-label="播放单词发音">
             <Icon name="volume" />
           </button>
           <button className="replay-link" onClick={replay}>再听一次</button>
           {audioStatus === "error" ? <div className="audio-error">发音加载失败，请重新加载后再作答。<button onClick={replay}>重新加载</button></div> : null}
-          {!result.formed && word.responseMode === "build" ? (
+          {!formed && word.responseMode === "build" ? (
             <BuildFormationQuestion
               word={word}
               selectedParts={selectedParts}
@@ -937,7 +932,7 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
               onUndo={() => setSelectedParts((current) => current.slice(0, -1))}
             />
           ) : null}
-          {!result.formed && word.responseMode === "spell" ? (
+          {!formed && word.responseMode === "spell" ? (
             <SpellingQuestion
               word={word}
               value={spelling}
@@ -947,27 +942,34 @@ function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
               onChange={changeSpelling}
             />
           ) : null}
-          {result.formed && !result.completed ? (
+          {formed && !wordCompleted ? (
             <MeaningQuestion word={word} result={result} onChoose={submitMeaning} />
           ) : null}
-          {result.completed ? <BuildWordFeedback word={word} result={result} onReplay={replay} onContinue={next} /> : null}
+          {wordCompleted ? <BuildWordFeedback word={word} result={result} round={entry.round} needsReview={roundHadError} onReplay={replay} onContinue={next} /> : null}
         </div>
       </section>
-      <BuildPracticeAside word={word} result={result} />
+      <BuildPracticeAside word={word} result={result} round={entry.round} formed={formed} />
       {leaveOpen ? <ExitDialog onStay={() => setLeaveOpen(false)} onLeave={onExit} /> : null}
     </main>
   );
 }
 
 function BuildFormationQuestion({ word, selectedParts, wrongIndexes, onChoose, onUndo }) {
+  const canUndoFromSlot = !wrongIndexes.length && selectedParts.length > 0 && selectedParts.length < word.parts.length;
   return (
     <div className="formation-question">
       <div className="assembly-slots" aria-label="已选择的构词模块">
-        {word.parts.map((part, index) => (
-          <span key={`${part}-${index}`} className={`${selectedParts[index] ? "filled" : ""} ${wrongIndexes.includes(index) ? "incorrect" : ""}`}>
-            {selectedParts[index] || ""}
-          </span>
-        ))}
+        {word.parts.map((part, index) => {
+          const selectedPart = selectedParts[index];
+          const stateClass = `${selectedPart ? "filled" : ""} ${wrongIndexes.length ? (wrongIndexes.includes(index) ? "incorrect" : "correct") : ""}`;
+          return selectedPart && canUndoFromSlot ? (
+            <button key={`${part}-${index}`} className={stateClass} onClick={onUndo} aria-label={`撤回已选择的 ${selectedPart}`}>
+              {selectedPart}
+            </button>
+          ) : (
+            <span key={`${part}-${index}`} className={stateClass}>{selectedPart || ""}</span>
+          );
+        })}
       </div>
       <p className="formation-guide">从下面选择前缀、词根或后缀，按顺序放入。</p>
       <div className="tile-bank">
@@ -1028,7 +1030,7 @@ function MeaningQuestion({ word, result, onChoose }) {
   );
 }
 
-function BuildWordFeedback({ word, result, onReplay, onContinue }) {
+function BuildWordFeedback({ word, result, round, needsReview, onReplay, onContinue }) {
   return (
     <div className="feedback positive build-feedback">
       <h2>完成：你已经连接了读音、拼写和词义</h2>
@@ -1043,6 +1045,7 @@ function BuildWordFeedback({ word, result, onReplay, onContinue }) {
       <span className={`tag ${result.formationFirstCorrect && result.meaningFirstCorrect ? "success" : "primary"}`}>
         {result.formationFirstCorrect && result.meaningFirstCorrect ? "两步首答正确" : "已通过练习掌握"}
       </span>
+      {needsReview ? <p className="cycle-note">{round < 3 ? "本次出现过错误，这个词会在本轮后面再次出现。" : "本词已完成最多三遍练习。"}</p> : null}
       <div className="feedback-actions">
         <button className="button secondary" onClick={onReplay}><Icon name="volume" />再听一次</button>
         <button className="button primary" onClick={onContinue}>下一题</button>
@@ -1051,7 +1054,7 @@ function BuildWordFeedback({ word, result, onReplay, onContinue }) {
   );
 }
 
-function BuildPracticeAside({ word, result }) {
+function BuildPracticeAside({ word, result, round, formed }) {
   return (
     <aside className="practice-aside">
       <h2>本次目标</h2>
@@ -1062,7 +1065,8 @@ function BuildPracticeAside({ word, result }) {
       </div>
       <div className="status-card">
         <h3>当前单词</h3>
-        <p>{result.formed ? "正在辨认中文释义" : word.responseMode === "build" ? "正在组合构词模块" : "正在键盘拼写"}</p>
+        <p>{formed ? "正在辨认中文释义" : word.responseMode === "build" ? "正在组合构词模块" : "正在键盘拼写"}</p>
+        {round > 1 ? <span>循环巩固第 {round} 遍 · </span> : null}
         <span>主动重听 {result.replays} 次</span>
       </div>
     </aside>

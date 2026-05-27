@@ -1,6 +1,9 @@
 import { BUILD_TASK, BUILD_WORDS } from "./wordBuildData.js";
 
 const STORAGE_KEY = "listen-build-meaning-session-v1";
+const MAX_ROUNDS = 3;
+
+const initialQueue = () => BUILD_WORDS.map((word) => ({ wordId: word.id, round: 1 }));
 
 const emptyResult = (wordId) => ({
   wordId,
@@ -13,6 +16,7 @@ const emptyResult = (wordId) => ({
   replays: 0,
   formed: false,
   completed: false,
+  studyRounds: [],
 });
 
 export function newBuildSession() {
@@ -22,6 +26,7 @@ export function newBuildSession() {
     startedAt: null,
     completedAt: null,
     currentIndex: 0,
+    queue: initialQueue(),
     results: Object.fromEntries(BUILD_WORDS.map((word) => [word.id, emptyResult(word.id)])),
   };
 }
@@ -32,7 +37,16 @@ export function loadBuildSession() {
     if (!saved) return newBuildSession();
     const parsed = JSON.parse(saved);
     if (parsed.taskId !== BUILD_TASK.id) return newBuildSession();
-    return parsed;
+    const fallback = newBuildSession();
+    return {
+      ...fallback,
+      ...parsed,
+      queue: parsed.queue || initialQueue(),
+      results: Object.fromEntries(BUILD_WORDS.map((word) => [
+        word.id,
+        { ...emptyResult(word.id), ...parsed.results?.[word.id] },
+      ])),
+    };
   } catch {
     return newBuildSession();
   }
@@ -40,6 +54,11 @@ export function loadBuildSession() {
 
 export function saveBuildSession(session) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+}
+
+export function enqueueBuildReview(queue, entry, needsReview) {
+  if (!needsReview || entry.round >= MAX_ROUNDS) return queue;
+  return [...queue, { wordId: entry.wordId, round: entry.round + 1 }];
 }
 
 export function getBuildMetrics(session) {

@@ -643,7 +643,8 @@ h3 {
   margin: 2px auto 19px;
 }
 
-.assembly-slots span {
+.assembly-slots span,
+.assembly-slots button {
   display: grid;
   place-items: center;
   min-width: 98px;
@@ -656,16 +657,36 @@ h3 {
   font-weight: 600;
 }
 
-.assembly-slots span.filled {
+.assembly-slots button {
+  cursor: pointer;
+}
+
+.assembly-slots span.filled,
+.assembly-slots button.filled {
   border-style: solid;
   border-color: #b4caf8;
   background: var(--primary-soft);
 }
 
-.assembly-slots span.incorrect {
-  border-color: #ed8983;
-  color: #aa3e42;
+.assembly-slots button.filled:hover {
+  border-color: var(--primary);
+  background: #e2eaff;
+}
+
+.assembly-slots span.correct,
+.assembly-slots button.correct {
+  border-color: var(--success);
+  color: var(--success);
+  background: var(--success-soft);
+  opacity: 0.52;
+}
+
+.assembly-slots span.incorrect,
+.assembly-slots button.incorrect {
+  border-color: var(--danger);
+  color: var(--danger);
   background: var(--danger-soft);
+  opacity: 0.52;
 }
 
 .formation-guide,
@@ -832,6 +853,12 @@ h3 {
 
 .build-feedback {
   margin-top: 0;
+}
+
+.cycle-note {
+  margin: 14px 0 2px;
+  color: #506685;
+  font-size: 13px;
 }
 
 .morphology-reveal {
@@ -1602,7 +1629,8 @@ h3 {
     width: 740px;
   }
 
-  .assembly-slots span {
+  .assembly-slots span,
+  .assembly-slots button {
     min-width: 74px;
     height: 53px;
     padding: 0 10px;

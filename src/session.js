@@ -1,6 +1,9 @@
 import { TASK, WORDS } from "./data.js";
 
 const STORAGE_KEY = "listen-meaning-session-v1";
+const MAX_ROUNDS = 3;
+
+const initialQueue = () => WORDS.map((word) => ({ wordId: word.id, round: 1 }));
 
 const emptyResult = (wordId) => ({
   wordId,
@@ -10,6 +13,7 @@ const emptyResult = (wordId) => ({
   reviewAttempts: 0,
   reviewReplays: 0,
   mastered: false,
+  studyRounds: [],
   focusedReviews: [],
 });
 
@@ -20,6 +24,7 @@ export function newSession() {
     startedAt: null,
     completedAt: null,
     currentIndex: 0,
+    queue: initialQueue(),
     results: Object.fromEntries(WORDS.map((word) => [word.id, emptyResult(word.id)])),
   };
 }
@@ -30,7 +35,16 @@ export function loadSession() {
     if (!saved) return newSession();
     const parsed = JSON.parse(saved);
     if (parsed.taskId !== TASK.id) return newSession();
-    return parsed;
+    const fallback = newSession();
+    return {
+      ...fallback,
+      ...parsed,
+      queue: parsed.queue || initialQueue(),
+      results: Object.fromEntries(WORDS.map((word) => [
+        word.id,
+        { ...emptyResult(word.id), ...parsed.results?.[word.id] },
+      ])),
+    };
   } catch {
     return newSession();
   }
@@ -54,6 +68,11 @@ export function getLabel(result) {
     return "learned_after_review";
   }
   return null;
+}
+
+export function enqueueMeaningReview(queue, entry, correct) {
+  if (correct || entry.round >= MAX_ROUNDS) return queue;
+  return [...queue, { wordId: entry.wordId, round: entry.round + 1 }];
 }
 
 export function getMetrics(session) {
