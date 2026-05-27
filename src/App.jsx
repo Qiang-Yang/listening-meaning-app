@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TASK, WORDS } from "./data.js";
 import { getLabel, getMetrics, loadSession, newSession, saveSession } from "./session.js";
+import { BUILD_TASK, BUILD_WORDS } from "./wordBuildData.js";
+import { getBuildMetrics, loadBuildSession, newBuildSession, saveBuildSession } from "./wordBuildSession.js";
 
 const LABELS = {
   fluent: { text: "熟练掌握", tone: "success" },
@@ -19,6 +21,12 @@ const GROUPS = [
 function usePersistedSession() {
   const [session, setSession] = useState(loadSession);
   useEffect(() => saveSession(session), [session]);
+  return [session, setSession];
+}
+
+function usePersistedBuildSession() {
+  const [session, setSession] = useState(loadBuildSession);
+  useEffect(() => saveBuildSession(session), [session]);
   return [session, setSession];
 }
 
@@ -67,9 +75,12 @@ function Icon({ name }) {
 
 function App() {
   const [session, setSession] = usePersistedSession();
+  const [buildSession, setBuildSession] = usePersistedBuildSession();
   const [screen, setScreen] = useState("tasks");
+  const [selectedTask, setSelectedTask] = useState("meaning");
   const [activeWordIds, setActiveWordIds] = useState(null);
   const metrics = getMetrics(session);
+  const buildMetrics = getBuildMetrics(buildSession);
 
   const beginTask = (reset = false) => {
     const base = reset ? newSession() : session;
@@ -83,20 +94,62 @@ function App() {
       currentIndex: firstOpenIndex === -1 ? 0 : firstOpenIndex,
     };
     setSession(updated);
+    setSelectedTask("meaning");
     setActiveWordIds(null);
     setScreen("practice");
   };
 
   const startFocusedReview = (ids) => {
+    setSelectedTask("meaning");
     setActiveWordIds(ids);
     setScreen("focused");
   };
 
+  const beginBuildTask = (reset = false) => {
+    const base = reset ? newBuildSession() : buildSession;
+    const firstOpenIndex = reset
+      ? 0
+      : BUILD_WORDS.findIndex((word) => !base.results[word.id].completed);
+    const updated = {
+      ...base,
+      status: "in_progress",
+      startedAt: base.startedAt || new Date().toISOString(),
+      currentIndex: firstOpenIndex === -1 ? 0 : firstOpenIndex,
+    };
+    setBuildSession(updated);
+    setSelectedTask("build");
+    setScreen("buildPractice");
+  };
+
+  const openTask = (taskId) => {
+    setSelectedTask(taskId);
+    setScreen(taskId === "build" ? "buildBriefing" : "briefing");
+  };
+
   return (
     <div className="app">
-      <Sidebar screen={screen} session={session} metrics={metrics} setScreen={setScreen} />
+      <Sidebar
+        screen={screen}
+        selectedTask={selectedTask}
+        session={session}
+        metrics={metrics}
+        buildSession={buildSession}
+        buildMetrics={buildMetrics}
+        setScreen={setScreen}
+      />
       {screen === "tasks" ? (
-        <TasksScreen session={session} metrics={metrics} onOpen={() => setScreen("briefing")} onReport={() => setScreen("report")} onRestart={() => beginTask(true)} />
+        <TasksScreen
+          session={session}
+          metrics={metrics}
+          buildSession={buildSession}
+          buildMetrics={buildMetrics}
+          onOpen={openTask}
+          onReport={(taskId) => {
+            setSelectedTask(taskId);
+            setScreen(taskId === "build" ? "buildReport" : "report");
+          }}
+          onRestart={(taskId) => (taskId === "build" ? beginBuildTask(true) : beginTask(true))}
+        />
       ) : null}
       {screen === "briefing" ? (
         <BriefingScreen session={session} onBack={() => setScreen("tasks")} onStart={() => beginTask(false)} />
@@ -116,23 +169,49 @@ function App() {
       {screen === "focused" ? (
         <FocusedReview session={session} setSession={setSession} ids={activeWordIds || metrics.focus.map((item) => item.wordId)} onDone={() => setScreen("report")} />
       ) : null}
+      {screen === "buildBriefing" ? (
+        <BuildBriefingScreen buildSession={buildSession} onBack={() => setScreen("tasks")} onStart={() => beginBuildTask(false)} />
+      ) : null}
+      {screen === "buildPractice" ? (
+        <BuildPracticeScreen
+          session={buildSession}
+          setSession={setBuildSession}
+          onExit={() => setScreen("tasks")}
+          onCompleted={() => setScreen("buildCompleted")}
+        />
+      ) : null}
+      {screen === "buildCompleted" ? (
+        <BuildCompletedScreen metrics={buildMetrics} onReport={() => setScreen("buildReport")} />
+      ) : null}
+      {screen === "buildReport" ? (
+        <BuildReport session={buildSession} metrics={buildMetrics} onRestart={() => beginBuildTask(true)} />
+      ) : null}
     </div>
   );
 }
 
-function Sidebar({ screen, session, metrics, setScreen }) {
+function Sidebar({ screen, selectedTask, session, metrics, buildSession, buildMetrics, setScreen }) {
+  const buildSelected = selectedTask === "build";
+  const currentSession = buildSelected ? buildSession : session;
+  const mastered = buildSelected ? buildMetrics.completed : metrics.mastered;
+  const total = buildSelected ? BUILD_WORDS.length : WORDS.length;
   const items = [
-    { id: "tasks", icon: "home", label: "今日任务" },
-    { id: "briefing", icon: "book", label: "练习说明" },
-    { id: "report", icon: "chart", label: "学习报告", disabled: session.status !== "completed" },
-    { id: "teacher", icon: "teacher", label: "教师视角", disabled: session.status !== "completed" },
+    { id: "tasks", target: "tasks", icon: "home", label: "学习任务" },
+    { id: "briefing", target: buildSelected ? "buildBriefing" : "briefing", icon: "book", label: "练习说明" },
+    { id: "report", target: buildSelected ? "buildReport" : "report", icon: "chart", label: "学习报告", disabled: currentSession.status !== "completed" },
   ];
+  if (!buildSelected) {
+    items.push({ id: "teacher", target: "teacher", icon: "teacher", label: "教师视角", disabled: session.status !== "completed" });
+  }
+  const activeId = screen.startsWith("build")
+    ? screen === "buildBriefing" ? "briefing" : screen === "buildReport" || screen === "buildCompleted" ? "report" : ""
+    : screen;
   return (
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">L</span><div><strong>ListenUp</strong><small>词汇听辨训练</small></div></div>
       <nav className="side-nav">
         {items.map((item) => (
-          <button key={item.id} className={screen === item.id ? "active" : ""} disabled={item.disabled} onClick={() => setScreen(item.id)}>
+          <button key={item.id} className={activeId === item.id ? "active" : ""} disabled={item.disabled} onClick={() => setScreen(item.target)}>
             <Icon name={item.icon} />
             {item.label}
           </button>
@@ -144,7 +223,7 @@ function Sidebar({ screen, session, metrics, setScreen }) {
         <span>高二（3）班</span>
         <div className="student-divider" />
         <small>本次进度</small>
-        <b>{metrics.mastered} / {WORDS.length} 词</b>
+        <b>{mastered} / {total} 词</b>
       </div>
     </aside>
   );
@@ -165,36 +244,69 @@ function PageHeader({ title, subtitle }) {
   );
 }
 
-function TasksScreen({ session, metrics, onOpen, onReport, onRestart }) {
-  const completed = session.status === "completed";
-  const inProgress = session.status === "in_progress";
+function TasksScreen({ session, metrics, buildSession, buildMetrics, onOpen, onReport, onRestart }) {
   return (
     <main className="main">
-      <PageHeader title="今日词汇任务" subtitle="通过听音辨认词义，完成今天的听力积累。" />
-      <section className="task-hero">
-        <div>
-          <h2>{TASK.name}</h2>
-          <p>听发音，选择正确中文意思。错题会立即带你重新掌握。</p>
-          <div className="meta-list">
-            <span>10 个单词</span><span>{TASK.duration}</span><span>可自由重听</span>
-          </div>
-        </div>
-        <div className="task-state">
-          <span>{completed ? "已完成" : inProgress ? "进行中" : "待开始"}</span>
-          {inProgress ? <strong>{metrics.mastered} / {WORDS.length}</strong> : null}
-          {completed ? <strong>{metrics.masteryRate}% 掌握</strong> : null}
-        </div>
-      </section>
-      <section className="task-actions">
-        {!completed ? <button className="button primary large" onClick={onOpen}>{inProgress ? "继续练习" : "开始练习"}</button> : null}
-        {completed ? <button className="button primary large" onClick={onReport}>查看报告</button> : null}
-        {completed ? <button className="button secondary large" onClick={onRestart}>再次练习</button> : null}
+      <PageHeader title="英语学习任务" subtitle="选择一种练习方式，通过听音积累词汇与含义。" />
+      <section className="task-grid">
+        <TaskCard
+          task={TASK}
+          description="听发音，选择正确中文意思。错题会立即带你重新掌握。"
+          tags={["10 个单词", TASK.duration, "听音辨义"]}
+          session={session}
+          mastered={metrics.mastered}
+          total={WORDS.length}
+          masteryRate={metrics.masteryRate}
+          onOpen={() => onOpen("meaning")}
+          onReport={() => onReport("meaning")}
+          onRestart={() => onRestart("meaning")}
+        />
+        <TaskCard
+          task={BUILD_TASK}
+          description="先根据读音完成构词或拼写，再选择与该词相关的中文释义。"
+          tags={["10 个单词", BUILD_TASK.duration, "构词 + 拼写"]}
+          session={buildSession}
+          mastered={buildMetrics.completed}
+          total={BUILD_WORDS.length}
+          masteryRate={buildMetrics.masteryRate}
+          onOpen={() => onOpen("build")}
+          onReport={() => onReport("build")}
+          onRestart={() => onRestart("build")}
+        />
       </section>
       <section className="learning-prompt">
         <h3>今天的学习建议</h3>
-        <p>找一个安静环境，先专注听词，再选择含义。需要时多听几遍，这也是学习的一部分。</p>
+        <p>找一个安静环境，先专注听音，再选择适合自己的练习。新任务会帮助你把声音、拼写结构和中文意思连接起来。</p>
       </section>
     </main>
+  );
+}
+
+function TaskCard({ task, description, tags, session, mastered, total, masteryRate, onOpen, onReport, onRestart }) {
+  const completed = session.status === "completed";
+  const inProgress = session.status === "in_progress";
+  return (
+    <article className="task-card">
+      <div className="task-card-top">
+        <div>
+          <h2>{task.name}</h2>
+          <p>{description}</p>
+        </div>
+        <div className="task-state">
+          <span>{completed ? "已完成" : inProgress ? "进行中" : "待开始"}</span>
+          {inProgress ? <strong>{mastered} / {total}</strong> : null}
+          {completed ? <strong>{masteryRate}% 完成</strong> : null}
+        </div>
+      </div>
+      <div className="meta-list">
+        {tags.map((tag) => <span key={tag}>{tag}</span>)}
+      </div>
+      <div className="task-actions">
+        {!completed ? <button className="button primary large" onClick={onOpen}>{inProgress ? "继续练习" : "开始练习"}</button> : null}
+        {completed ? <button className="button primary large" onClick={onReport}>查看报告</button> : null}
+        {completed ? <button className="button secondary large" onClick={onRestart}>再次练习</button> : null}
+      </div>
+    </article>
   );
 }
 
@@ -430,7 +542,7 @@ function CompletedScreen({ metrics, onReport, onFocus }) {
       <section className="completion-card">
         <div className="completion-check"><Icon name="check" /></div>
         <h1>本次练习完成</h1>
-        <p>你通过练习和复习，完成了今天的听音选义任务。</p>
+        <p>你通过练习和复习，完成了今天的听音辨义任务。</p>
         <div className="completion-stats">
           <div><strong>{WORDS.length}</strong><span>学习题数</span></div>
           <div><strong>{metrics.mastered}</strong><span>最终掌握</span></div>
@@ -628,6 +740,389 @@ function FocusedReview({ session, setSession, ids, onDone }) {
           </div>
         )}
       </section>
+    </main>
+  );
+}
+
+function BuildBriefingScreen({ buildSession, onBack, onStart }) {
+  const [audioStatus, setAudioStatus] = useState("idle");
+  const testAudio = () => speakWord(BUILD_WORDS[0], setAudioStatus);
+  return (
+    <main className="main briefing">
+      <button className="text-back" onClick={onBack}><Icon name="back" />返回任务</button>
+      <section className="brief-card build-brief">
+        <h1>{BUILD_TASK.name}</h1>
+        <p className="brief-lead">听音还原英文，再选择对应中文释义</p>
+        <div className="brief-stats">
+          <div><strong>10</strong><span>题目总数</span></div>
+          <div><strong>2</strong><span>作答阶段</span></div>
+          <div><strong>不限</strong><span>重听次数</span></div>
+        </div>
+        <div className="rules">
+          <h3>练习规则</h3>
+          <p><Icon name="check" /> 可拆词会提供词根与词缀模块，按构词顺序组合。</p>
+          <p><Icon name="check" /> 不适合拆解的词直接键盘拼写，输满后自动判断。</p>
+          <p><Icon name="check" /> 完成英文后进入四选一释义，报告分别记录两步表现。</p>
+        </div>
+        <button className="audio-check" onClick={testAudio}><Icon name="volume" />试听发音 {audioStatus === "playing" ? "播放中..." : ""}</button>
+        {audioStatus === "error" ? <p className="error-note">无法播放发音，请检查浏览器音频权限后重试。</p> : null}
+        <button className="button primary block" onClick={onStart}>{buildSession.status === "in_progress" ? "继续练习" : "开始"}</button>
+      </section>
+    </main>
+  );
+}
+
+function BuildPracticeScreen({ session, setSession, onExit, onCompleted }) {
+  const index = session.currentIndex;
+  const word = BUILD_WORDS[index];
+  const result = session.results[word.id];
+  const [selectedParts, setSelectedParts] = useState([]);
+  const [wrongIndexes, setWrongIndexes] = useState([]);
+  const [spelling, setSpelling] = useState("");
+  const [spellingError, setSpellingError] = useState(false);
+  const [audioStatus, setAudioStatus] = useState("ready");
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const audioKey = useRef("");
+  const spellingRef = useRef(null);
+
+  useEffect(() => {
+    setSelectedParts([]);
+    setWrongIndexes([]);
+    setSpelling("");
+    setSpellingError(false);
+  }, [word]);
+
+  useEffect(() => {
+    const phase = result.completed ? "completed" : result.formed ? "meaning" : "formation";
+    const key = `${word.id}-${phase}`;
+    if (audioKey.current !== key) {
+      audioKey.current = key;
+      speakWord(word, setAudioStatus);
+    }
+  }, [result.completed, result.formed, word]);
+
+  useEffect(() => {
+    if (!result.formed && word.responseMode === "spell") {
+      spellingRef.current?.focus();
+    }
+  }, [result.formed, word.responseMode]);
+
+  const replay = () => {
+    speakWord(word, setAudioStatus);
+    if (!result.formed && word.responseMode === "spell") {
+      requestAnimationFrame(() => {
+        spellingRef.current?.focus();
+        if (spellingError) spellingRef.current?.select();
+      });
+    }
+    setSession((current) => ({
+      ...current,
+      results: {
+        ...current.results,
+        [word.id]: { ...current.results[word.id], replays: current.results[word.id].replays + 1 },
+      },
+    }));
+  };
+
+  const saveFormationAttempt = (correct, wrongSpelling = null) => {
+    setSession((current) => {
+      const currentResult = current.results[word.id];
+      return {
+        ...current,
+        results: {
+          ...current.results,
+          [word.id]: {
+            ...currentResult,
+            formationAttempts: currentResult.formationAttempts + 1,
+            formationFirstCorrect: currentResult.formationFirstCorrect === null ? correct : currentResult.formationFirstCorrect,
+            wrongSpellings: wrongSpelling ? [...currentResult.wrongSpellings, wrongSpelling] : currentResult.wrongSpellings,
+            formed: correct,
+          },
+        },
+      };
+    });
+  };
+
+  const choosePart = (part) => {
+    if (!wrongIndexes.length && (selectedParts.includes(part) || selectedParts.length === word.parts.length)) return;
+    const next = wrongIndexes.length ? [part] : [...selectedParts, part];
+    if (wrongIndexes.length) setWrongIndexes([]);
+    setSelectedParts(next);
+    if (next.length !== word.parts.length) return;
+    const incorrect = next.flatMap((selected, position) => selected === word.parts[position] ? [] : [position]);
+    if (incorrect.length) {
+      setWrongIndexes(incorrect);
+      saveFormationAttempt(false);
+      return;
+    }
+    saveFormationAttempt(true);
+  };
+
+  const changeSpelling = (event) => {
+    const value = event.target.value.toLowerCase().replace(/[^a-z]/g, "").slice(0, word.word.length);
+    setSpelling(value);
+    setSpellingError(false);
+    if (value.length !== word.word.length) return;
+    if (value === word.word) {
+      saveFormationAttempt(true);
+      return;
+    }
+    saveFormationAttempt(false, value);
+    setSpellingError(true);
+    requestAnimationFrame(() => {
+      spellingRef.current?.focus();
+      spellingRef.current?.select();
+    });
+  };
+
+  const submitMeaning = (choice) => {
+    const correct = choice === word.meaning;
+    setSession((current) => {
+      const currentResult = current.results[word.id];
+      return {
+        ...current,
+        results: {
+          ...current.results,
+          [word.id]: {
+            ...currentResult,
+            meaningAttempts: currentResult.meaningAttempts + 1,
+            meaningFirstCorrect: currentResult.meaningFirstCorrect === null ? correct : currentResult.meaningFirstCorrect,
+            wrongMeanings: correct || currentResult.wrongMeanings.includes(choice)
+              ? currentResult.wrongMeanings
+              : [...currentResult.wrongMeanings, choice],
+            completed: correct,
+          },
+        },
+      };
+    });
+    if (!correct) {
+      speakWord(word, setAudioStatus);
+    }
+  };
+
+  const next = () => {
+    if (index === BUILD_WORDS.length - 1) {
+      setSession((current) => ({ ...current, status: "completed", completedAt: new Date().toISOString() }));
+      onCompleted();
+      return;
+    }
+    setSession((current) => ({ ...current, currentIndex: index + 1 }));
+    audioKey.current = "";
+  };
+
+  return (
+    <main className="practice-layout build-practice">
+      <section className="practice-stage">
+        <div className="practice-top">
+          <button className="quiet-button" onClick={() => setLeaveOpen(true)}><Icon name="back" />暂离</button>
+          <div className="progress-area">
+            <span>{index + 1} / {BUILD_WORDS.length}</span>
+            <div className="progress"><i style={{ width: `${((index + 1) / BUILD_WORDS.length) * 100}%` }} /></div>
+          </div>
+        </div>
+        <div className="question-panel build-panel">
+          <p className="mode-label">{result.completed ? "本词完成" : result.formed ? "第 2 步：理解词义" : "第 1 步：还原英文"}</p>
+          <h1>{result.completed ? "跟随发音，再记一次这个单词" : result.formed ? "选择与这个单词对应的中文释义" : word.responseMode === "build" ? "听发音，按构词顺序组合单词" : "听发音，输入完整拼写"}</h1>
+          <button className={`play-circle ${audioStatus === "playing" ? "speaking" : ""}`} onClick={replay} aria-label="播放单词发音">
+            <Icon name="volume" />
+          </button>
+          <button className="replay-link" onClick={replay}>再听一次</button>
+          {audioStatus === "error" ? <div className="audio-error">发音加载失败，请重新加载后再作答。<button onClick={replay}>重新加载</button></div> : null}
+          {!result.formed && word.responseMode === "build" ? (
+            <BuildFormationQuestion
+              word={word}
+              selectedParts={selectedParts}
+              wrongIndexes={wrongIndexes}
+              onChoose={choosePart}
+              onUndo={() => setSelectedParts((current) => current.slice(0, -1))}
+            />
+          ) : null}
+          {!result.formed && word.responseMode === "spell" ? (
+            <SpellingQuestion
+              word={word}
+              value={spelling}
+              inputRef={spellingRef}
+              wrongSpellings={result.wrongSpellings}
+              showError={spellingError}
+              onChange={changeSpelling}
+            />
+          ) : null}
+          {result.formed && !result.completed ? (
+            <MeaningQuestion word={word} result={result} onChoose={submitMeaning} />
+          ) : null}
+          {result.completed ? <BuildWordFeedback word={word} result={result} onReplay={replay} onContinue={next} /> : null}
+        </div>
+      </section>
+      <BuildPracticeAside word={word} result={result} />
+      {leaveOpen ? <ExitDialog onStay={() => setLeaveOpen(false)} onLeave={onExit} /> : null}
+    </main>
+  );
+}
+
+function BuildFormationQuestion({ word, selectedParts, wrongIndexes, onChoose, onUndo }) {
+  return (
+    <div className="formation-question">
+      <div className="assembly-slots" aria-label="已选择的构词模块">
+        {word.parts.map((part, index) => (
+          <span key={`${part}-${index}`} className={`${selectedParts[index] ? "filled" : ""} ${wrongIndexes.includes(index) ? "incorrect" : ""}`}>
+            {selectedParts[index] || ""}
+          </span>
+        ))}
+      </div>
+      <p className="formation-guide">从下面选择前缀、词根或后缀，按顺序放入。</p>
+      <div className="tile-bank">
+        {word.tiles.map((part) => (
+          <button key={part} disabled={!wrongIndexes.length && selectedParts.includes(part)} className={!wrongIndexes.length && selectedParts.includes(part) ? "used" : ""} onClick={() => onChoose(part)}>{part}</button>
+        ))}
+      </div>
+      {!wrongIndexes.length ? <div className="formation-actions"><button className="button secondary" disabled={!selectedParts.length} onClick={onUndo}>撤回上一步</button></div> : null}
+    </div>
+  );
+}
+
+function SpellingQuestion({ word, value, inputRef, wrongSpellings, showError, onChange }) {
+  const earlierAttempts = showError ? wrongSpellings.slice(0, -1) : wrongSpellings;
+  const showAnswer = wrongSpellings.length >= 2;
+  const firstMismatch = showError ? Array.from(value).findIndex((letter, index) => letter !== word.word[index]) : -1;
+  return (
+    <div className="spelling-question">
+      <label className="spelling-slots">
+        <span className="sr-only">输入听到的英文单词</span>
+        <input ref={inputRef} value={value} onChange={onChange} maxLength={word.word.length} autoComplete="off" spellCheck="false" aria-label="输入听到的英文单词" />
+        <span className={`letter-slots ${showError ? "failed" : ""}`} aria-hidden="true">
+          {Array.from({ length: word.word.length }, (_, index) => (
+            <i key={index} className={showError ? index < firstMismatch ? "correct-prefix" : "incorrect-suffix" : ""}>
+              {value[index] || ""}
+            </i>
+          ))}
+        </span>
+      </label>
+      <p className={`spelling-guide ${showError ? "error" : ""}`}>{showError ? "这次拼写不正确，直接重新输入即可。" : "使用键盘输入；字母输满后自动判断。"}</p>
+      {showAnswer ? <p className="spelling-answer">正确拼写：<strong>{word.word}</strong></p> : null}
+      {earlierAttempts.length ? (
+        <div className="spelling-history">
+          <small>已尝试</small>
+          {earlierAttempts.map((attempt, index) => <span key={`${attempt}-${index}`}>{attempt}</span>)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MeaningQuestion({ word, result, onChoose }) {
+  return (
+    <div className="build-meaning-question">
+      <div className="formed-word"><strong>{word.word}</strong><span>{word.phonetic}</span></div>
+      <div className="options">
+        {word.meaningOptions.map((option) => {
+          const wrong = result.wrongMeanings.includes(option);
+          return (
+            <button key={option} disabled={wrong} className={`option ${wrong ? "wrong tried" : ""}`} onClick={() => onChoose(option)}>
+              {option}
+            </button>
+          );
+        })}
+      </div>
+      {result.wrongMeanings.length ? <p className="meaning-retry">这个释义不匹配，请再听一次并重新选择。</p> : null}
+    </div>
+  );
+}
+
+function BuildWordFeedback({ word, result, onReplay, onContinue }) {
+  return (
+    <div className="feedback positive build-feedback">
+      <h2>完成：你已经连接了读音、拼写和词义</h2>
+      <div className="word-reveal">
+        <strong>{word.word}</strong><span>{word.phonetic}</span><b>{word.meaning}</b>
+      </div>
+      {word.responseMode === "build" ? (
+        <div className="morphology-reveal">
+          {word.morphology.map((piece) => <span key={piece.part}><strong>{piece.part}</strong>{piece.meaning}</span>)}
+        </div>
+      ) : <p>{word.spellingTip}</p>}
+      <span className={`tag ${result.formationFirstCorrect && result.meaningFirstCorrect ? "success" : "primary"}`}>
+        {result.formationFirstCorrect && result.meaningFirstCorrect ? "两步首答正确" : "已通过练习掌握"}
+      </span>
+      <div className="feedback-actions">
+        <button className="button secondary" onClick={onReplay}><Icon name="volume" />再听一次</button>
+        <button className="button primary" onClick={onContinue}>下一题</button>
+      </div>
+    </div>
+  );
+}
+
+function BuildPracticeAside({ word, result }) {
+  return (
+    <aside className="practice-aside">
+      <h2>本次目标</h2>
+      <p>先听出英文结构或拼写，再把声音与中文含义连接起来。</p>
+      <div className="tip-card">
+        <h3>{word.responseMode === "build" ? "构词提示" : "拼写提示"}</h3>
+        <p>{word.responseMode === "build" ? "优先辨认前缀、词根和后缀，不会提前展示正确组合。" : "根据完整读音输入，错误尝试会保留供你比较。"}</p>
+      </div>
+      <div className="status-card">
+        <h3>当前单词</h3>
+        <p>{result.formed ? "正在辨认中文释义" : word.responseMode === "build" ? "正在组合构词模块" : "正在键盘拼写"}</p>
+        <span>主动重听 {result.replays} 次</span>
+      </div>
+    </aside>
+  );
+}
+
+function BuildCompletedScreen({ metrics, onReport }) {
+  return (
+    <main className="main completion">
+      <section className="completion-card">
+        <div className="completion-check"><Icon name="check" /></div>
+        <h1>构词与释义练习完成</h1>
+        <p>你已经完成 10 个单词的听音还原和中文释义练习。</p>
+        <div className="completion-stats">
+          <div><strong>{BUILD_WORDS.length}</strong><span>学习题数</span></div>
+          <div><strong>{metrics.formationRate}%</strong><span>英文首答</span></div>
+          <div><strong>{metrics.meaningRate}%</strong><span>释义首答</span></div>
+          <div><strong>{metrics.focus.length}</strong><span>建议巩固</span></div>
+        </div>
+        <button className="button primary large" onClick={onReport}>查看学习报告</button>
+      </section>
+    </main>
+  );
+}
+
+function BuildReport({ session, metrics, onRestart }) {
+  return (
+    <main className="main report build-report">
+      <PageHeader title={`${BUILD_TASK.name} · 学习报告`} subtitle="分别查看英文还原与中文释义的掌握情况。" />
+      <section className="summary-grid">
+        <Metric value={`${metrics.completed}/${BUILD_WORDS.length}`} label="最终完成" tone="success" />
+        <Metric value={`${metrics.formationRate}%`} label="英文还原首答" />
+        <Metric value={`${metrics.meaningRate}%`} label="中文释义首答" />
+        <Metric value={`${metrics.focus.length} 词`} label="建议巩固" tone="warning" />
+      </section>
+      <p className="report-message">
+        {metrics.focus.length
+          ? `有 ${metrics.focus.length} 个词在构词、拼写或释义环节经过重试后掌握，建议再次听写巩固。`
+          : "你在英文还原和中文释义两步都表现稳定。"}
+      </p>
+      <section className="build-word-list">
+        {BUILD_WORDS.map((word) => {
+          const result = session.results[word.id];
+          return (
+            <article className="build-word-row" key={word.id}>
+              <div className="word-identity"><strong>{word.word}</strong><span>{word.phonetic}</span></div>
+              <span className="mode-chip">{word.responseMode === "build" ? "构词组合" : "整体拼写"}</span>
+              <span className={result.formationFirstCorrect ? "answer-good" : "answer-bad"}>英文{result.formationFirstCorrect ? "首答正确" : "经重试"}</span>
+              <span className={result.meaningFirstCorrect ? "answer-good" : "answer-bad"}>释义{result.meaningFirstCorrect ? "首答正确" : "经重试"}</span>
+              <button className="row-audio" onClick={() => speakWord(word, () => {})}><Icon name="volume" /></button>
+              {word.responseMode === "build" ? (
+                <div className="row-morphology">{word.morphology.map((piece) => <small key={piece.part}>{piece.part} {piece.meaning}</small>)}</div>
+              ) : <small className="row-morphology">{word.spellingTip}</small>}
+            </article>
+          );
+        })}
+      </section>
+      <div className="report-actions">
+        <button className="button primary large" onClick={onRestart}>重新练习全部单词</button>
+      </div>
     </main>
   );
 }

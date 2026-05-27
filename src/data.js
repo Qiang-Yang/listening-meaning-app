@@ -1,6 +1,6 @@
 export const TASK = {
   id: "unit-3-listen-meaning",
-  name: "Unit 3 听音选义",
+  name: "听音辨义",
   grade: "高二",
   duration: "约 6 分钟",
   replayThreshold: 2,
