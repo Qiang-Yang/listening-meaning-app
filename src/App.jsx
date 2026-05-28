@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { speakText, useRecorder } from "./audio.js";
 import { TASK, WORDS } from "./data.js";
 import { enqueueMeaningReview, getLabel, getMetrics, loadSession, newSession, saveSession } from "./session.js";
+import { SHADOW_SENTENCES, SPEAKING_TASK, SPEAKING_WORDS } from "./speakingData.js";
+import { getSpeakingMetrics, loadSpeakingSession, newSpeakingSession, saveSpeakingSession } from "./speakingSession.js";
 import { BUILD_TASK, BUILD_WORDS } from "./wordBuildData.js";
 import { enqueueBuildReview, getBuildMetrics, loadBuildSession, newBuildSession, saveBuildSession } from "./wordBuildSession.js";
 
@@ -18,6 +21,12 @@ const GROUPS = [
   { id: "fluent", title: "已熟练掌握", note: "首答稳定" },
 ];
 
+const SPEECH_SPEEDS = [
+  { id: "slow", label: "慢速", rate: 0.72 },
+  { id: "normal", label: "常速", rate: 0.86 },
+  { id: "fast", label: "快速", rate: 1 },
+];
+
 function usePersistedSession() {
   const [session, setSession] = useState(loadSession);
   useEffect(() => saveSession(session), [session]);
@@ -30,29 +39,19 @@ function usePersistedBuildSession() {
   return [session, setSession];
 }
 
+function usePersistedSpeakingSession() {
+  const [session, setSession] = useState(loadSpeakingSession);
+  useEffect(() => saveSpeakingSession(session), [session]);
+  return [session, setSession];
+}
+
 function rotateOptions(options, turns) {
   const shift = turns % options.length;
   return [...options.slice(shift), ...options.slice(0, shift)];
 }
 
 function speakWord(word, setAudioStatus) {
-  if (!("speechSynthesis" in window)) {
-    setAudioStatus("error");
-    return false;
-  }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(word.word);
-  utterance.lang = "en-US";
-  utterance.rate = 0.86;
-  utterance.onstart = () => setAudioStatus("playing");
-  utterance.onend = () => setAudioStatus("ready");
-  utterance.onerror = (event) => {
-    if (event.error !== "canceled" && event.error !== "interrupted") {
-      setAudioStatus("error");
-    }
-  };
-  window.speechSynthesis.speak(utterance);
-  return true;
+  return speakText(word.word, setAudioStatus);
 }
 
 function Icon({ name }) {
@@ -63,6 +62,9 @@ function Icon({ name }) {
     teacher: "M4 18h16M7 18V7h10v11M10 11h4",
     play: "M9 7.5 18 12l-9 4.5z",
     volume: "M5 10h4l5-4v12l-5-4H5zm12-1c2 2 2 4 0 6",
+    mic: "M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm6-3a6 6 0 0 1-12 0m6 6v4m-4 0h8",
+    stop: "M8 8h8v8H8z",
+    headphones: "M4 14v-2a8 8 0 0 1 16 0v2m-16 0h4v6H4zm12 0h4v6h-4z",
     back: "M15.5 5.5 9 12l6.5 6.5",
     check: "m5 12 4.5 4.5L19 7",
   };
@@ -76,11 +78,13 @@ function Icon({ name }) {
 function App() {
   const [session, setSession] = usePersistedSession();
   const [buildSession, setBuildSession] = usePersistedBuildSession();
+  const [speakingSession, setSpeakingSession] = usePersistedSpeakingSession();
   const [screen, setScreen] = useState("tasks");
   const [selectedTask, setSelectedTask] = useState("meaning");
   const [activeWordIds, setActiveWordIds] = useState(null);
   const metrics = getMetrics(session);
   const buildMetrics = getBuildMetrics(buildSession);
+  const speakingMetrics = getSpeakingMetrics(speakingSession);
 
   const beginTask = (reset = false) => {
     const base = reset ? newSession() : session;
@@ -115,9 +119,24 @@ function App() {
     setScreen("buildPractice");
   };
 
+  const beginSpeakingTask = (mode, reset = false) => {
+    const base = reset ? newSpeakingSession() : speakingSession;
+    const updated = {
+      ...base,
+      mode,
+      status: "in_progress",
+      startedAt: base.startedAt || new Date().toISOString(),
+      currentWordIndex: reset && mode === "word" ? 0 : base.currentWordIndex,
+      currentSentenceIndex: reset && mode === "shadow" ? 0 : base.currentSentenceIndex,
+    };
+    setSpeakingSession(updated);
+    setSelectedTask("speaking");
+    setScreen(mode === "shadow" ? "speakingShadowPractice" : "speakingWordPractice");
+  };
+
   const openTask = (taskId) => {
     setSelectedTask(taskId);
-    setScreen(taskId === "build" ? "buildBriefing" : "briefing");
+    setScreen(taskId === "build" ? "buildBriefing" : taskId === "speaking" ? "speakingBriefing" : "briefing");
   };
 
   return (
@@ -129,6 +148,8 @@ function App() {
         metrics={metrics}
         buildSession={buildSession}
         buildMetrics={buildMetrics}
+        speakingSession={speakingSession}
+        speakingMetrics={speakingMetrics}
         setScreen={setScreen}
       />
       {screen === "tasks" ? (
@@ -137,12 +158,14 @@ function App() {
           metrics={metrics}
           buildSession={buildSession}
           buildMetrics={buildMetrics}
+          speakingSession={speakingSession}
+          speakingMetrics={speakingMetrics}
           onOpen={openTask}
           onReport={(taskId) => {
             setSelectedTask(taskId);
-            setScreen(taskId === "build" ? "buildReport" : "report");
+            setScreen(taskId === "build" ? "buildReport" : taskId === "speaking" ? "speakingReport" : "report");
           }}
-          onRestart={(taskId) => (taskId === "build" ? beginBuildTask(true) : beginTask(true))}
+          onRestart={(taskId) => (taskId === "build" ? beginBuildTask(true) : taskId === "speaking" ? beginSpeakingTask("word", true) : beginTask(true))}
         />
       ) : null}
       {screen === "briefing" ? (
@@ -180,25 +203,59 @@ function App() {
       {screen === "buildReport" ? (
         <BuildReport session={buildSession} metrics={buildMetrics} onRestart={() => beginBuildTask(true)} />
       ) : null}
+      {screen === "speakingBriefing" ? (
+        <SpeakingBriefingScreen
+          session={speakingSession}
+          metrics={speakingMetrics}
+          onBack={() => setScreen("tasks")}
+          onStart={beginSpeakingTask}
+          onReport={() => setScreen("speakingReport")}
+        />
+      ) : null}
+      {screen === "speakingWordPractice" ? (
+        <SpeakingWordPracticeScreen
+          session={speakingSession}
+          setSession={setSpeakingSession}
+          onExit={() => setScreen("tasks")}
+          onCompleted={() => setScreen("speakingCompleted")}
+        />
+      ) : null}
+      {screen === "speakingShadowPractice" ? (
+        <SpeakingShadowPracticeScreen
+          session={speakingSession}
+          setSession={setSpeakingSession}
+          onExit={() => setScreen("tasks")}
+          onCompleted={() => setScreen("speakingCompleted")}
+        />
+      ) : null}
+      {screen === "speakingCompleted" ? (
+        <SpeakingCompletedScreen metrics={speakingMetrics} onReport={() => setScreen("speakingReport")} onContinue={() => setScreen("speakingBriefing")} />
+      ) : null}
+      {screen === "speakingReport" ? (
+        <SpeakingReport session={speakingSession} metrics={speakingMetrics} onRestart={() => beginSpeakingTask("word", true)} onPractice={beginSpeakingTask} />
+      ) : null}
     </div>
   );
 }
 
-function Sidebar({ screen, selectedTask, session, metrics, buildSession, buildMetrics, setScreen }) {
+function Sidebar({ screen, selectedTask, session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, setScreen }) {
   const buildSelected = selectedTask === "build";
-  const currentSession = buildSelected ? buildSession : session;
-  const mastered = buildSelected ? buildMetrics.completed : metrics.mastered;
-  const total = buildSelected ? BUILD_WORDS.length : WORDS.length;
+  const speakingSelected = selectedTask === "speaking";
+  const currentSession = speakingSelected ? speakingSession : buildSelected ? buildSession : session;
+  const mastered = speakingSelected ? speakingMetrics.totalCompleted : buildSelected ? buildMetrics.completed : metrics.mastered;
+  const total = speakingSelected ? speakingMetrics.totalItems : buildSelected ? BUILD_WORDS.length : WORDS.length;
   const items = [
     { id: "tasks", target: "tasks", icon: "home", label: "学习任务" },
-    { id: "briefing", target: buildSelected ? "buildBriefing" : "briefing", icon: "book", label: "练习说明" },
-    { id: "report", target: buildSelected ? "buildReport" : "report", icon: "chart", label: "学习报告", disabled: currentSession.status !== "completed" },
+    { id: "briefing", target: speakingSelected ? "speakingBriefing" : buildSelected ? "buildBriefing" : "briefing", icon: "book", label: "练习说明" },
+    { id: "report", target: speakingSelected ? "speakingReport" : buildSelected ? "buildReport" : "report", icon: "chart", label: "学习报告", disabled: currentSession.status !== "completed" },
   ];
-  if (!buildSelected) {
+  if (!buildSelected && !speakingSelected) {
     items.push({ id: "teacher", target: "teacher", icon: "teacher", label: "教师视角", disabled: session.status !== "completed" });
   }
   const activeId = screen.startsWith("build")
     ? screen === "buildBriefing" ? "briefing" : screen === "buildReport" || screen === "buildCompleted" ? "report" : ""
+    : screen.startsWith("speaking")
+      ? screen === "speakingBriefing" ? "briefing" : screen === "speakingReport" || screen === "speakingCompleted" ? "report" : ""
     : screen;
   return (
     <aside className="sidebar">
@@ -238,10 +295,10 @@ function PageHeader({ title, subtitle }) {
   );
 }
 
-function TasksScreen({ session, metrics, buildSession, buildMetrics, onOpen, onReport, onRestart }) {
+function TasksScreen({ session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, onOpen, onReport, onRestart }) {
   return (
     <main className="main">
-      <PageHeader title="英语学习任务" subtitle="选择一种练习方式，通过听音积累词汇与含义。" />
+      <PageHeader title="英语学习任务" subtitle="选择一种练习方式，通过听、拼、说把英语真正用起来。" />
       <section className="task-grid">
         <TaskCard
           task={TASK}
@@ -267,10 +324,22 @@ function TasksScreen({ session, metrics, buildSession, buildMetrics, onOpen, onR
           onReport={() => onReport("build")}
           onRestart={() => onRestart("build")}
         />
+        <TaskCard
+          task={SPEAKING_TASK}
+          description="先练单词发音，再做整句影子跟读；录下自己的声音，对照标准音复练。"
+          tags={[`${SPEAKING_WORDS.length} 个单词`, `${SHADOW_SENTENCES.length} 个句子`, "发音 + 跟读"]}
+          session={speakingSession}
+          mastered={speakingMetrics.totalCompleted}
+          total={speakingMetrics.totalItems}
+          masteryRate={speakingMetrics.completionRate}
+          onOpen={() => onOpen("speaking")}
+          onReport={() => onReport("speaking")}
+          onRestart={() => onRestart("speaking")}
+        />
       </section>
       <section className="learning-prompt">
         <h3>今天的学习建议</h3>
-        <p>找一个安静环境，先专注听音，再选择适合自己的练习。新任务会帮助你把声音、拼写结构和中文意思连接起来。</p>
+        <p>找一个安静环境，先专注听音，再选择适合自己的练习。新任务会帮助你把声音、拼写结构、中文意思和口头表达连接起来。</p>
       </section>
     </main>
   );
@@ -487,7 +556,7 @@ function QuestionFeedback({ word, result, correct, round, onReplay, onContinue }
     <div className={`feedback ${correct ? "positive" : "negative"}`}>
       <h2>{correct ? (round > 1 ? "已重新掌握这个词" : "正确，你听出了这个单词。") : `这个词的意思是：${word.meaning}`}</h2>
       <div className="word-reveal">
-        <strong>{word.word}</strong><span>{word.phonetic}</span><b>{word.meaning}</b>
+        <strong>{word.word}</strong><WordMeta word={word} /><b>{word.meaning}</b>
       </div>
       {!correct ? <p>{word.tip} {round < 3 ? "这个词会在本轮后面再次出现。" : "本轮已达到三遍练习上限。"}</p> : null}
       {label ? <span className={`tag ${label.tone}`}>{label.text}</span> : null}
@@ -565,6 +634,15 @@ function Metric({ value, label, tone = "" }) {
   return <div className={`metric ${tone}`}><strong>{value}</strong><span>{label}</span></div>;
 }
 
+function WordMeta({ word }) {
+  return (
+    <>
+      <span>{word.phonetic}</span>
+      <em>{word.partOfSpeech}</em>
+    </>
+  );
+}
+
 function WordGroup({ group, words, session, onFocus }) {
   const badge = LABELS[group.id];
   return (
@@ -575,7 +653,7 @@ function WordGroup({ group, words, session, onFocus }) {
         const lastFocus = result.focusedReviews.at(-1);
         return (
           <div className="word-row" key={word.id}>
-            <div className="word-identity"><strong>{word.word}</strong><span>{word.phonetic}</span></div>
+            <div className="word-identity"><strong>{word.word}</strong><WordMeta word={word} /></div>
             <p>{word.meaning}</p>
             <span className={`tag ${badge.tone}`}>{badge.text}</span>
             <small>重听 {result.firstReplays + result.reviewReplays} 次{lastFocus ? " · 已再次巩固" : ""}</small>
@@ -711,7 +789,7 @@ function FocusedReview({ session, setSession, ids, onDone }) {
         {!feedback ? <button className="button primary submit" disabled={!choice || audioStatus === "error"} onClick={submit}>确认</button> : (
           <div className={`focus-feedback ${feedback === "correct" ? "positive" : "negative"}`}>
             <h2>{feedback === "correct" ? "这次你直接听对了" : `正确意思是：${word.meaning}`}</h2>
-            <p>{word.word} {word.phonetic} · {word.tip}</p>
+            <p>{word.word} {word.phonetic} {word.partOfSpeech} · {word.tip}</p>
             <button className="button primary" onClick={continueFocused}>{feedback === "correct" ? (position + 1 === ids.length ? "完成巩固" : "下一个词") : "重新选择"}</button>
           </div>
         )}
@@ -1014,7 +1092,7 @@ function SpellingQuestion({ word, value, inputRef, wrongSpellings, showError, on
 function MeaningQuestion({ word, result, onChoose }) {
   return (
     <div className="build-meaning-question">
-      <div className="formed-word"><strong>{word.word}</strong><span>{word.phonetic}</span></div>
+      <div className="formed-word"><strong>{word.word}</strong><WordMeta word={word} /></div>
       <div className="options">
         {word.meaningOptions.map((option) => {
           const wrong = result.wrongMeanings.includes(option);
@@ -1035,7 +1113,7 @@ function BuildWordFeedback({ word, result, round, needsReview, onReplay, onConti
     <div className="feedback positive build-feedback">
       <h2>完成：你已经连接了读音、拼写和词义</h2>
       <div className="word-reveal">
-        <strong>{word.word}</strong><span>{word.phonetic}</span><b>{word.meaning}</b>
+        <strong>{word.word}</strong><WordMeta word={word} /><b>{word.meaning}</b>
       </div>
       {word.responseMode === "build" ? (
         <div className="morphology-reveal">
@@ -1112,7 +1190,7 @@ function BuildReport({ session, metrics, onRestart }) {
           const result = session.results[word.id];
           return (
             <article className="build-word-row" key={word.id}>
-              <div className="word-identity"><strong>{word.word}</strong><span>{word.phonetic}</span></div>
+              <div className="word-identity"><strong>{word.word}</strong><WordMeta word={word} /></div>
               <span className="mode-chip">{word.responseMode === "build" ? "构词组合" : "整体拼写"}</span>
               <span className={result.formationFirstCorrect ? "answer-good" : "answer-bad"}>英文{result.formationFirstCorrect ? "首答正确" : "经重试"}</span>
               <span className={result.meaningFirstCorrect ? "answer-good" : "answer-bad"}>释义{result.meaningFirstCorrect ? "首答正确" : "经重试"}</span>
@@ -1128,6 +1206,414 @@ function BuildReport({ session, metrics, onRestart }) {
         <button className="button primary large" onClick={onRestart}>重新练习全部单词</button>
       </div>
     </main>
+  );
+}
+
+function SpeakingBriefingScreen({ session, metrics, onBack, onStart, onReport }) {
+  const [audioStatus, setAudioStatus] = useState("idle");
+  const sampleSentence = SHADOW_SENTENCES[0];
+  const hasReport = session.status === "completed";
+  return (
+    <main className="main briefing">
+      <button className="text-back" onClick={onBack}><Icon name="back" />返回任务</button>
+      <section className="speaking-brief">
+        <div className="speaking-brief-copy">
+          <h1>{SPEAKING_TASK.name}</h1>
+          <p>先把单词读准，再把整句跟上。这个任务会记录录音次数、标准音播放和需要复练的内容。</p>
+          <div className="brief-stats speaking-stats">
+            <div><strong>{SPEAKING_WORDS.length}</strong><span>发音词</span></div>
+            <div><strong>{SHADOW_SENTENCES.length}</strong><span>跟读句</span></div>
+            <div><strong>{metrics.averageRecordings}</strong><span>平均录音</span></div>
+          </div>
+          <button className="audio-check" onClick={() => speakText(sampleSentence.sentence, setAudioStatus, { rate: 0.82 })}>
+            <Icon name="headphones" />试听整句 {audioStatus === "playing" ? "播放中..." : ""}
+          </button>
+          {audioStatus === "error" ? <p className="error-note">无法播放标准音，请检查浏览器音频权限后重试。</p> : null}
+          {hasReport ? <button className="button secondary block" onClick={onReport}>查看已有报告</button> : null}
+        </div>
+        <div className="speaking-mode-grid">
+          <SpeakingModeCard
+            icon="mic"
+            title="单词发音练习"
+            body="听标准音，观察音节和重音，录下自己的读音并回放对照。"
+            meta={`${metrics.wordCompleted} / ${SPEAKING_WORDS.length} 完成`}
+            onClick={() => onStart("word", false)}
+          />
+          <SpeakingModeCard
+            icon="headphones"
+            title="整句影子跟读"
+            body="先听整句，再按意群跟读，最后录完整句训练节奏和表达。"
+            meta={`${metrics.sentenceCompleted} / ${SHADOW_SENTENCES.length} 完成`}
+            onClick={() => onStart("shadow", false)}
+          />
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function SpeakingModeCard({ icon, title, body, meta, onClick }) {
+  return (
+    <button className="speaking-mode-card" onClick={onClick}>
+      <span className="mode-icon"><Icon name={icon} /></span>
+      <strong>{title}</strong>
+      <p>{body}</p>
+      <small>{meta}</small>
+    </button>
+  );
+}
+
+function SpeakingWordPracticeScreen({ session, setSession, onExit, onCompleted }) {
+  const index = Math.min(session.currentWordIndex, SPEAKING_WORDS.length - 1);
+  const word = SPEAKING_WORDS[index];
+  const result = session.results.words[word.id];
+  const [audioStatus, setAudioStatus] = useState("ready");
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const recorder = useRecorder();
+
+  useEffect(() => {
+    recorder.clear();
+  }, [word.id]);
+
+  const playStandard = () => {
+    speakWord(word, setAudioStatus);
+    setSession((current) => ({
+      ...current,
+      results: {
+        ...current.results,
+        words: {
+          ...current.results.words,
+          [word.id]: { ...current.results.words[word.id], standardPlays: current.results.words[word.id].standardPlays + 1 },
+        },
+      },
+    }));
+  };
+
+  const startRecording = async () => {
+    const started = await recorder.start();
+    if (!started) return;
+    setSession((current) => ({
+      ...current,
+      results: {
+        ...current.results,
+        words: {
+          ...current.results.words,
+          [word.id]: { ...current.results.words[word.id], recordings: current.results.words[word.id].recordings + 1 },
+        },
+      },
+    }));
+  };
+
+  const finishWord = (selfRating) => {
+    const needsReview = selfRating === "review";
+    setSession((current) => {
+      const words = {
+        ...current.results.words,
+        [word.id]: {
+          ...current.results.words[word.id],
+          completed: true,
+          needsReview,
+          selfRating,
+          completedAt: new Date().toISOString(),
+        },
+      };
+      const completedWords = Object.values(words).filter((item) => item.completed).length;
+      const allDone = completedWords === SPEAKING_WORDS.length && getSpeakingMetrics({ ...current, results: { ...current.results, words } }).sentenceCompleted === SHADOW_SENTENCES.length;
+      return {
+        ...current,
+        status: allDone ? "completed" : current.status,
+        completedAt: allDone ? new Date().toISOString() : current.completedAt,
+        results: { ...current.results, words },
+      };
+    });
+    if (index === SPEAKING_WORDS.length - 1) onCompleted();
+    else setSession((current) => ({ ...current, currentWordIndex: index + 1 }));
+  };
+
+  return (
+    <main className="practice-layout speaking-practice">
+      <section className="practice-stage">
+        <div className="practice-top">
+          <button className="quiet-button" onClick={() => setLeaveOpen(true)}><Icon name="back" />暂离</button>
+          <div className="progress-area">
+            <span>{index + 1} / {SPEAKING_WORDS.length}</span>
+            <div className="progress"><i style={{ width: `${((index + 1) / SPEAKING_WORDS.length) * 100}%` }} /></div>
+          </div>
+        </div>
+        <div className="question-panel speaking-panel">
+          <p className="mode-label">单词发音</p>
+          <h1>听标准音，录下自己的发音</h1>
+          <div className="speaking-word-main">
+            <strong>{word.word}</strong>
+            <WordMeta word={word} />
+            <b>{word.meaning}</b>
+          </div>
+          <SyllableStrip syllables={word.syllables} stress={word.stress} />
+          <div className="speaking-controls">
+            <button className={`play-circle ${audioStatus === "playing" ? "speaking" : ""}`} onClick={playStandard} aria-label="播放标准发音"><Icon name="volume" /></button>
+            <RecorderControl recorder={recorder} onStart={startRecording} />
+          </div>
+          <RecordingPlayback recorder={recorder} />
+          <div className="pronunciation-tips">
+            {word.pronunciationTips.map((tip) => <span key={tip}>{tip}</span>)}
+          </div>
+          {recorder.error ? <p className="error-note">{recorder.error}</p> : null}
+          {audioStatus === "error" ? <p className="error-note">标准音播放失败，请重新加载后再试。</p> : null}
+          <div className="speaking-actions">
+            <button className="button secondary" disabled={!recorder.audioUrl} onClick={() => recorder.clear()}>再录一次</button>
+            <button className="button secondary" disabled={!recorder.audioUrl} onClick={() => finishWord("review")}>加入复练</button>
+            <button className="button primary" disabled={!recorder.audioUrl} onClick={() => finishWord("mastered")}>标记已掌握</button>
+          </div>
+        </div>
+      </section>
+      <SpeakingPracticeAside title="本次目标" body="把标准音、自己的录音和音节重音放在一起比较。" result={result} />
+      {leaveOpen ? <ExitDialog onStay={() => setLeaveOpen(false)} onLeave={onExit} /> : null}
+    </main>
+  );
+}
+
+function SyllableStrip({ syllables, stress }) {
+  return (
+    <div className="pronunciation-chunks">
+      <small>发音分块</small>
+      <div className="syllable-strip">
+        {syllables.map((syllable) => <span key={syllable} className={syllable === stress ? "stressed" : ""}>{syllable}</span>)}
+      </div>
+    </div>
+  );
+}
+
+function RecorderControl({ recorder, onStart }) {
+  if (recorder.status === "recording") {
+    return <button className="record-circle recording" onClick={recorder.stop} aria-label="停止录音"><Icon name="stop" /></button>;
+  }
+  return <button className="record-circle" onClick={onStart} aria-label="开始录音"><Icon name="mic" /></button>;
+}
+
+function RecordingPlayback({ recorder }) {
+  return (
+    <div className={`recording-playback ${recorder.audioUrl ? "ready" : ""}`}>
+      <span>{recorder.status === "recording" ? "正在录音..." : recorder.audioUrl ? "已录好，可以回放对照" : "点击麦克风录下你的声音"}</span>
+      {recorder.audioUrl ? <audio src={recorder.audioUrl} controls /> : null}
+    </div>
+  );
+}
+
+function SpeakingShadowPracticeScreen({ session, setSession, onExit, onCompleted }) {
+  const index = Math.min(session.currentSentenceIndex, SHADOW_SENTENCES.length - 1);
+  const sentence = SHADOW_SENTENCES[index];
+  const result = session.results.sentences[sentence.id];
+  const [audioStatus, setAudioStatus] = useState("ready");
+  const [speedId, setSpeedId] = useState("normal");
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const recorder = useRecorder();
+  const speed = SPEECH_SPEEDS.find((item) => item.id === speedId) || SPEECH_SPEEDS[1];
+
+  useEffect(() => {
+    recorder.clear();
+  }, [sentence.id]);
+
+  const playStandard = () => {
+    const text = sentence.sentence;
+    speakText(text, setAudioStatus, {
+      rate: speed.rate,
+    });
+    setSession((current) => ({
+      ...current,
+      results: {
+        ...current.results,
+        sentences: {
+          ...current.results.sentences,
+          [sentence.id]: { ...current.results.sentences[sentence.id], standardPlays: current.results.sentences[sentence.id].standardPlays + 1 },
+        },
+      },
+    }));
+  };
+
+  const startRecording = async () => {
+    const started = await recorder.start();
+    if (!started) return;
+    setSession((current) => ({
+      ...current,
+      results: {
+        ...current.results,
+        sentences: {
+          ...current.results.sentences,
+          [sentence.id]: { ...current.results.sentences[sentence.id], recordings: current.results.sentences[sentence.id].recordings + 1 },
+        },
+      },
+    }));
+  };
+
+  const finishSentence = (selfRating) => {
+    const needsReview = selfRating === "review";
+    setSession((current) => {
+      const sentences = {
+        ...current.results.sentences,
+        [sentence.id]: {
+          ...current.results.sentences[sentence.id],
+          completed: true,
+          needsReview,
+          selfRating,
+          completedAt: new Date().toISOString(),
+        },
+      };
+      const completedSentences = Object.values(sentences).filter((item) => item.completed).length;
+      const allDone = completedSentences === SHADOW_SENTENCES.length && getSpeakingMetrics({ ...current, results: { ...current.results, sentences } }).wordCompleted === SPEAKING_WORDS.length;
+      return {
+        ...current,
+        status: allDone ? "completed" : current.status,
+        completedAt: allDone ? new Date().toISOString() : current.completedAt,
+        results: { ...current.results, sentences },
+      };
+    });
+    if (index === SHADOW_SENTENCES.length - 1) onCompleted();
+    else setSession((current) => ({ ...current, currentSentenceIndex: index + 1 }));
+  };
+
+  return (
+    <main className="practice-layout speaking-practice">
+      <section className="practice-stage">
+        <div className="practice-top">
+          <button className="quiet-button" onClick={() => setLeaveOpen(true)}><Icon name="back" />暂离</button>
+          <div className="progress-area">
+            <span>{index + 1} / {SHADOW_SENTENCES.length}</span>
+            <div className="progress"><i style={{ width: `${((index + 1) / SHADOW_SENTENCES.length) * 100}%` }} /></div>
+          </div>
+        </div>
+        <div className="question-panel speaking-panel shadow-panel">
+          <p className="mode-label">影子跟读</p>
+          <h1>先听整句，再跟读录音</h1>
+          <SpeedControl value={speedId} onChange={setSpeedId} />
+          <div className="shadow-sentence">
+            <div className="shadow-line">
+              {sentence.chunks.map((chunk, chunkIndex) => (
+                <span key={chunk.text} className={`shadow-chunk tone-${chunkIndex % 3}`}>
+                  <strong>{chunk.text}{chunkIndex === sentence.chunks.length - 1 ? "." : ""}</strong>
+                  <small>{chunk.cue}</small>
+                </span>
+              ))}
+            </div>
+            <span>{sentence.translation}</span>
+          </div>
+          <p className="shadow-tip">{sentence.shadowTip}</p>
+          <div className="speaking-controls">
+            <button className={`play-circle ${audioStatus === "playing" ? "speaking" : ""}`} onClick={() => playStandard()} aria-label="播放整句"><Icon name="volume" /></button>
+            <RecorderControl recorder={recorder} onStart={startRecording} />
+          </div>
+          <RecordingPlayback recorder={recorder} />
+          {recorder.error ? <p className="error-note">{recorder.error}</p> : null}
+          {audioStatus === "error" ? <p className="error-note">标准音播放失败，请重新加载后再试。</p> : null}
+          <div className="speaking-actions">
+            <button className="button secondary" disabled={!recorder.audioUrl} onClick={() => recorder.clear()}>再录一次</button>
+            <button className="button secondary" disabled={!recorder.audioUrl} onClick={() => finishSentence("review")}>加入复练</button>
+            <button className="button primary" disabled={!recorder.audioUrl} onClick={() => finishSentence("mastered")}>完成本句</button>
+          </div>
+        </div>
+      </section>
+      <SpeakingPracticeAside title="跟读提示" body="看色块停顿，先听整句，再按色块跟读。速度不够稳时先用慢速。" result={result} />
+      {leaveOpen ? <ExitDialog onStay={() => setLeaveOpen(false)} onLeave={onExit} /> : null}
+    </main>
+  );
+}
+
+function SpeedControl({ value, onChange }) {
+  return (
+    <div className="speed-control" aria-label="语速选择">
+      {SPEECH_SPEEDS.map((speed) => (
+        <button key={speed.id} className={value === speed.id ? "active" : ""} onClick={() => onChange(speed.id)}>
+          {speed.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function SpeakingPracticeAside({ title, body, result }) {
+  return (
+    <aside className="practice-aside">
+      <h2>{title}</h2>
+      <p>{body}</p>
+      <div className="tip-card">
+        <h3>练习证据</h3>
+        <p>标准音播放 {result.standardPlays} 次，已录音 {result.recordings} 次。</p>
+      </div>
+      <div className="status-card">
+        <h3>当前状态</h3>
+        <p>{result.completed ? "已完成" : "正在练习"}</p>
+        <span>{result.needsReview ? "已加入复练" : "完成后可自行标记是否复练"}</span>
+      </div>
+    </aside>
+  );
+}
+
+function SpeakingCompletedScreen({ metrics, onReport, onContinue }) {
+  const allDone = metrics.totalCompleted === metrics.totalItems;
+  return (
+    <main className="main completion">
+      <section className="completion-card">
+        <div className="completion-check"><Icon name="check" /></div>
+        <h1>{allDone ? "口语表达任务完成" : "本组口语练习完成"}</h1>
+        <p>{allDone ? "你已经完成单词发音和整句跟读。" : "可以继续完成另一个口语模式，形成完整练习记录。"}</p>
+        <div className="completion-stats">
+          <div><strong>{metrics.wordCompleted}</strong><span>发音词</span></div>
+          <div><strong>{metrics.sentenceCompleted}</strong><span>跟读句</span></div>
+          <div><strong>{metrics.averageRecordings}</strong><span>平均录音</span></div>
+          <div><strong>{metrics.review.length}</strong><span>复练项</span></div>
+        </div>
+        <button className="button primary large" onClick={allDone ? onReport : onContinue}>{allDone ? "查看学习报告" : "继续口语模式"}</button>
+        <button className="button secondary large" onClick={onReport}>查看当前报告</button>
+      </section>
+    </main>
+  );
+}
+
+function SpeakingReport({ session, metrics, onRestart, onPractice }) {
+  return (
+    <main className="main report speaking-report">
+      <PageHeader title={`${SPEAKING_TASK.name} · 学习报告`} subtitle="报告只记录练习证据和自评复练，不做虚假的精准发音评分。" />
+      <section className="summary-grid">
+        <Metric value={`${metrics.totalCompleted}/${metrics.totalItems}`} label="完成进度" tone="success" />
+        <Metric value={`${metrics.wordCompleted}/${SPEAKING_WORDS.length}`} label="单词发音" />
+        <Metric value={`${metrics.sentenceCompleted}/${SHADOW_SENTENCES.length}`} label="影子跟读" />
+        <Metric value={`${metrics.review.length} 项`} label="建议复练" tone="warning" />
+      </section>
+      <p className="report-message">
+        本次共播放标准音 {metrics.plays} 次，录音 {metrics.recordings} 次，平均每个已完成项目录音 {metrics.averageRecordings} 次。
+      </p>
+      <section className="speaking-report-list">
+        <SpeakingReportGroup title="单词发音" items={SPEAKING_WORDS} results={session.results.words} type="word" />
+        <SpeakingReportGroup title="影子跟读" items={SHADOW_SENTENCES} results={session.results.sentences} type="sentence" />
+      </section>
+      <div className="report-actions">
+        <button className="button primary large" onClick={() => onPractice("word", false)}>继续单词发音</button>
+        <button className="button primary large" onClick={() => onPractice("shadow", false)}>继续影子跟读</button>
+        <button className="button secondary large" onClick={onRestart}>重新练习全部口语</button>
+      </div>
+    </main>
+  );
+}
+
+function SpeakingReportGroup({ title, items, results, type }) {
+  return (
+    <div className="word-group speaking-group">
+      <header><h2>{title}</h2><p>{type === "word" ? "发音、重音和音节练习记录" : "整句听力输入与表达练习记录"}</p></header>
+      {items.map((item) => {
+        const result = results[item.id];
+        return (
+          <div className="speaking-report-row" key={item.id}>
+            <div className="word-identity">
+              <strong>{type === "word" ? item.word : item.sentence}</strong>
+              {type === "word" ? <WordMeta word={item} /> : null}
+            </div>
+            <span className={`tag ${result.completed ? "success" : "warning"}`}>{result.completed ? "已完成" : "未完成"}</span>
+            <span>{result.recordings} 次录音</span>
+            <span>{result.standardPlays} 次标准音</span>
+            <span className={`tag ${result.needsReview ? "warning" : "primary"}`}>{result.needsReview ? "建议复练" : result.completed ? "自评掌握" : "待练习"}</span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
