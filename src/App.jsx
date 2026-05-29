@@ -6,6 +6,18 @@ import { SHADOW_SENTENCES, SPEAKING_TASK, SPEAKING_WORDS } from "./speakingData.
 import { getSpeakingMetrics, loadSpeakingSession, newSpeakingSession, saveSpeakingSession } from "./speakingSession.js";
 import { BUILD_TASK, BUILD_WORDS } from "./wordBuildData.js";
 import { enqueueBuildReview, getBuildMetrics, loadBuildSession, newBuildSession, saveBuildSession } from "./wordBuildSession.js";
+import { READING_WRITING_SETS, READING_WRITING_TASK, ROLE_LABELS } from "./readingWritingData.js";
+import {
+  appendReviewIfNeeded,
+  getItemForEntry,
+  getReadingWritingMetrics,
+  getSentences,
+  getSetChunkBank,
+  getUsedChunks,
+  loadReadingWritingSession,
+  newReadingWritingSession,
+  saveReadingWritingSession,
+} from "./readingWritingSession.js";
 
 const LABELS = {
   fluent: { text: "熟练掌握", tone: "success" },
@@ -45,6 +57,12 @@ function usePersistedSpeakingSession() {
   return [session, setSession];
 }
 
+function usePersistedReadingWritingSession() {
+  const [session, setSession] = useState(loadReadingWritingSession);
+  useEffect(() => saveReadingWritingSession(session), [session]);
+  return [session, setSession];
+}
+
 function rotateOptions(options, turns) {
   const shift = turns % options.length;
   return [...options.slice(shift), ...options.slice(0, shift)];
@@ -79,12 +97,14 @@ function App() {
   const [session, setSession] = usePersistedSession();
   const [buildSession, setBuildSession] = usePersistedBuildSession();
   const [speakingSession, setSpeakingSession] = usePersistedSpeakingSession();
+  const [readingWritingSession, setReadingWritingSession] = usePersistedReadingWritingSession();
   const [screen, setScreen] = useState("tasks");
   const [selectedTask, setSelectedTask] = useState("meaning");
   const [activeWordIds, setActiveWordIds] = useState(null);
   const metrics = getMetrics(session);
   const buildMetrics = getBuildMetrics(buildSession);
   const speakingMetrics = getSpeakingMetrics(speakingSession);
+  const readingWritingMetrics = getReadingWritingMetrics(readingWritingSession);
 
   const beginTask = (reset = false) => {
     const base = reset ? newSession() : session;
@@ -134,9 +154,22 @@ function App() {
     setScreen(mode === "shadow" ? "speakingShadowPractice" : "speakingWordPractice");
   };
 
+  const beginReadingWritingTask = (mode = "source", reset = false) => {
+    const base = reset ? newReadingWritingSession() : readingWritingSession;
+    const updated = {
+      ...base,
+      activeMode: mode,
+      status: "in_progress",
+      startedAt: base.startedAt || new Date().toISOString(),
+    };
+    setReadingWritingSession(updated);
+    setSelectedTask("readingWriting");
+    setScreen("readingWritingPractice");
+  };
+
   const openTask = (taskId) => {
     setSelectedTask(taskId);
-    setScreen(taskId === "build" ? "buildBriefing" : taskId === "speaking" ? "speakingBriefing" : "briefing");
+    setScreen(taskId === "build" ? "buildBriefing" : taskId === "speaking" ? "speakingBriefing" : taskId === "readingWriting" ? "readingWritingBriefing" : "briefing");
   };
 
   return (
@@ -150,6 +183,8 @@ function App() {
         buildMetrics={buildMetrics}
         speakingSession={speakingSession}
         speakingMetrics={speakingMetrics}
+        readingWritingSession={readingWritingSession}
+        readingWritingMetrics={readingWritingMetrics}
         setScreen={setScreen}
       />
       {screen === "tasks" ? (
@@ -160,12 +195,14 @@ function App() {
           buildMetrics={buildMetrics}
           speakingSession={speakingSession}
           speakingMetrics={speakingMetrics}
+          readingWritingSession={readingWritingSession}
+          readingWritingMetrics={readingWritingMetrics}
           onOpen={openTask}
           onReport={(taskId) => {
             setSelectedTask(taskId);
-            setScreen(taskId === "build" ? "buildReport" : taskId === "speaking" ? "speakingReport" : "report");
+            setScreen(taskId === "build" ? "buildReport" : taskId === "speaking" ? "speakingReport" : taskId === "readingWriting" ? "readingWritingReport" : "report");
           }}
-          onRestart={(taskId) => (taskId === "build" ? beginBuildTask(true) : taskId === "speaking" ? beginSpeakingTask("word", true) : beginTask(true))}
+          onRestart={(taskId) => (taskId === "build" ? beginBuildTask(true) : taskId === "speaking" ? beginSpeakingTask("word", true) : taskId === "readingWriting" ? beginReadingWritingTask("source", true) : beginTask(true))}
         />
       ) : null}
       {screen === "briefing" ? (
@@ -234,28 +271,54 @@ function App() {
       {screen === "speakingReport" ? (
         <SpeakingReport session={speakingSession} metrics={speakingMetrics} onRestart={() => beginSpeakingTask("word", true)} onPractice={beginSpeakingTask} />
       ) : null}
+      {screen === "readingWritingBriefing" ? (
+        <ReadingWritingBriefingScreen
+          session={readingWritingSession}
+          metrics={readingWritingMetrics}
+          onBack={() => setScreen("tasks")}
+          onStart={beginReadingWritingTask}
+          onToggleAutoPlay={(checked) => setReadingWritingSession((current) => ({ ...current, autoPlay: checked }))}
+        />
+      ) : null}
+      {screen === "readingWritingPractice" ? (
+        <ReadingWritingPracticeScreen
+          session={readingWritingSession}
+          setSession={setReadingWritingSession}
+          onExit={() => setScreen("tasks")}
+          onCompleted={() => setScreen("readingWritingCompleted")}
+        />
+      ) : null}
+      {screen === "readingWritingCompleted" ? (
+        <ReadingWritingCompletedScreen metrics={readingWritingMetrics} onReport={() => setScreen("readingWritingReport")} />
+      ) : null}
+      {screen === "readingWritingReport" ? (
+        <ReadingWritingReport session={readingWritingSession} metrics={readingWritingMetrics} onRestart={() => beginReadingWritingTask("source", true)} onPractice={beginReadingWritingTask} />
+      ) : null}
     </div>
   );
 }
 
-function Sidebar({ screen, selectedTask, session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, setScreen }) {
+function Sidebar({ screen, selectedTask, session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, readingWritingSession, readingWritingMetrics, setScreen }) {
   const buildSelected = selectedTask === "build";
   const speakingSelected = selectedTask === "speaking";
-  const currentSession = speakingSelected ? speakingSession : buildSelected ? buildSession : session;
-  const mastered = speakingSelected ? speakingMetrics.totalCompleted : buildSelected ? buildMetrics.completed : metrics.mastered;
-  const total = speakingSelected ? speakingMetrics.totalItems : buildSelected ? BUILD_WORDS.length : WORDS.length;
+  const readingWritingSelected = selectedTask === "readingWriting";
+  const currentSession = readingWritingSelected ? readingWritingSession : speakingSelected ? speakingSession : buildSelected ? buildSession : session;
+  const mastered = readingWritingSelected ? readingWritingMetrics.completedModes : speakingSelected ? speakingMetrics.totalCompleted : buildSelected ? buildMetrics.completed : metrics.mastered;
+  const total = readingWritingSelected ? readingWritingMetrics.totalModes : speakingSelected ? speakingMetrics.totalItems : buildSelected ? BUILD_WORDS.length : WORDS.length;
   const items = [
     { id: "tasks", target: "tasks", icon: "home", label: "学习任务" },
-    { id: "briefing", target: speakingSelected ? "speakingBriefing" : buildSelected ? "buildBriefing" : "briefing", icon: "book", label: "练习说明" },
-    { id: "report", target: speakingSelected ? "speakingReport" : buildSelected ? "buildReport" : "report", icon: "chart", label: "学习报告", disabled: currentSession.status !== "completed" },
+    { id: "briefing", target: readingWritingSelected ? "readingWritingBriefing" : speakingSelected ? "speakingBriefing" : buildSelected ? "buildBriefing" : "briefing", icon: "book", label: "练习说明" },
+    { id: "report", target: readingWritingSelected ? "readingWritingReport" : speakingSelected ? "speakingReport" : buildSelected ? "buildReport" : "report", icon: "chart", label: "学习报告", disabled: currentSession.status !== "completed" },
   ];
-  if (!buildSelected && !speakingSelected) {
+  if (!buildSelected && !speakingSelected && !readingWritingSelected) {
     items.push({ id: "teacher", target: "teacher", icon: "teacher", label: "教师视角", disabled: session.status !== "completed" });
   }
   const activeId = screen.startsWith("build")
     ? screen === "buildBriefing" ? "briefing" : screen === "buildReport" || screen === "buildCompleted" ? "report" : ""
     : screen.startsWith("speaking")
       ? screen === "speakingBriefing" ? "briefing" : screen === "speakingReport" || screen === "speakingCompleted" ? "report" : ""
+      : screen.startsWith("readingWriting")
+        ? screen === "readingWritingBriefing" ? "briefing" : screen === "readingWritingReport" || screen === "readingWritingCompleted" ? "report" : ""
     : screen;
   return (
     <aside className="sidebar">
@@ -295,7 +358,7 @@ function PageHeader({ title, subtitle }) {
   );
 }
 
-function TasksScreen({ session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, onOpen, onReport, onRestart }) {
+function TasksScreen({ session, metrics, buildSession, buildMetrics, speakingSession, speakingMetrics, readingWritingSession, readingWritingMetrics, onOpen, onReport, onRestart }) {
   return (
     <main className="main">
       <PageHeader title="英语学习任务" subtitle="选择一种练习方式，通过听、拼、说把英语真正用起来。" />
@@ -335,6 +398,18 @@ function TasksScreen({ session, metrics, buildSession, buildMetrics, speakingSes
           onOpen={() => onOpen("speaking")}
           onReport={() => onReport("speaking")}
           onRestart={() => onRestart("speaking")}
+        />
+        <TaskCard
+          task={READING_WRITING_TASK}
+          description="读懂句子和短文，反复遇见目标词块，再用色块提示写出自己的句子。"
+          tags={["4 个独立任务", "最多复练 2 次", "阅读 + 写句"]}
+          session={readingWritingSession}
+          mastered={readingWritingMetrics.completedModes}
+          total={readingWritingMetrics.totalModes}
+          masteryRate={readingWritingMetrics.completionRate}
+          onOpen={() => onOpen("readingWriting")}
+          onReport={() => onReport("readingWriting")}
+          onRestart={() => onRestart("readingWriting")}
         />
       </section>
       <section className="learning-prompt">
@@ -1614,6 +1689,471 @@ function SpeakingReportGroup({ title, items, results, type }) {
         );
       })}
     </div>
+  );
+}
+
+const RW_MODES = [
+  { id: "source", label: "认词", body: "听整句，判断色块词在句中的含义。", accent: "blue" },
+  { id: "retrieval", label: "检索", body: "根据任务从短文里找出对应句子。", accent: "green" },
+  { id: "judge", label: "语义判断", body: "先判断词块意思，再判断逻辑作用。", accent: "purple" },
+  { id: "application", label: "词汇应用", body: "根据背景写句子，尝试迁移目标词块。", accent: "amber" },
+];
+
+const MODE_LABELS = Object.fromEntries(RW_MODES.map((mode) => [mode.id, mode.label]));
+
+function ReadingWritingBriefingScreen({ session, metrics, onBack, onStart, onToggleAutoPlay }) {
+  const autoPlay = session.autoPlay !== false;
+  return (
+    <main className="main briefing">
+      <button className="text-back" onClick={onBack}><Icon name="back" />返回任务</button>
+      <section className="reading-writing-home">
+        <div className="rw-home-copy">
+          <h1>{READING_WRITING_TASK.name}</h1>
+          <p>选择一个独立任务练习。每个任务都有自己的错题循环，答完后会停在解析区，等你回顾后再继续。</p>
+          <label className="rw-audio-toggle rw-home-toggle">
+            <input type="checkbox" checked={autoPlay} onChange={(event) => onToggleAutoPlay(event.target.checked)} />
+            自动播放例句/词块
+          </label>
+          <div className="brief-stats speaking-stats">
+            <div><strong>{metrics.completedModes}</strong><span>已完成任务</span></div>
+            <div><strong>{metrics.transferredChunks.length}</strong><span>迁移词块</span></div>
+            <div><strong>2</strong><span>最多复练</span></div>
+          </div>
+        </div>
+        <div className="rw-mode-grid">
+          {RW_MODES.map((mode) => {
+            const stat = metrics.modeMetrics[mode.id];
+            return (
+              <button key={mode.id} className={`rw-mode-card ${mode.accent}`} onClick={() => onStart(mode.id, false)}>
+                <span>{mode.label}</span>
+                <strong>{stat.completed}/{stat.total}</strong>
+                <p>{mode.body}</p>
+                <small>{stat.done ? "已完成" : stat.reviewNeeded ? `${stat.reviewNeeded} 题进入复练` : "可开始"}</small>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function ReadingWritingPracticeScreen({ session, setSession, onExit, onCompleted }) {
+  const mode = session.activeMode || "source";
+  const modeState = session.modes[mode];
+  const entry = modeState.queue[Math.min(modeState.currentIndex, Math.max(modeState.queue.length - 1, 0))];
+  const entryContext = entry ? getItemForEntry(mode, entry) : null;
+  const result = entryContext ? modeState.results[entryContext.key] : null;
+  const progress = modeState.queue.length ? ((modeState.currentIndex + 1) / modeState.queue.length) * 100 : 100;
+  const autoPlay = session.autoPlay !== false;
+
+  const setAutoPlay = (checked) => {
+    setSession((current) => ({ ...current, autoPlay: checked }));
+  };
+
+  const updateMode = (updater) => {
+    setSession((current) => {
+      const active = current.activeMode || mode;
+      const nextMode = updater(current.modes[active], active);
+      const modes = { ...current.modes, [active]: nextMode };
+      const allDone = Object.values(modes).every((item) => item.completed);
+      return {
+        ...current,
+        status: allDone ? "completed" : current.status,
+        completedAt: allDone ? new Date().toISOString() : current.completedAt,
+        modes,
+      };
+    });
+  };
+
+  const goPrevious = () => {
+    updateMode((current) => ({ ...current, currentIndex: Math.max(0, current.currentIndex - 1) }));
+  };
+  const goNext = () => {
+    updateMode((current) => {
+      const atEnd = current.currentIndex >= current.queue.length - 1;
+      return { ...current, completed: atEnd ? true : current.completed, currentIndex: atEnd ? current.currentIndex : current.currentIndex + 1 };
+    });
+    if (Object.values(session.modes).every((item) => item.completed || item === modeState && modeState.currentIndex >= modeState.queue.length - 1)) {
+      onCompleted();
+    }
+  };
+
+  if (!entryContext) {
+    return (
+      <main className="main completion">
+        <section className="completion-card">
+          <h1>{MODE_LABELS[mode]}已完成</h1>
+          <button className="button primary large" onClick={onExit}>返回任务</button>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="practice-layout reading-writing-practice rw-independent">
+      <section className="practice-stage">
+        <div className="practice-top rw-practice-top">
+          <button className="quiet-button" onClick={onExit}><Icon name="back" />返回</button>
+          <div className="progress-area">
+            <span>{MODE_LABELS[mode]} {modeState.currentIndex + 1} / {modeState.queue.length}</span>
+            <div className="progress"><i style={{ width: `${progress}%` }} /></div>
+          </div>
+          <label className="rw-audio-toggle">
+            <input type="checkbox" checked={autoPlay} onChange={(event) => setAutoPlay(event.target.checked)} />
+            自动播放
+          </label>
+        </div>
+        <div className="question-panel rw-panel">
+          <p className="mode-label">{entryContext.set.title} · {MODE_LABELS[mode]} · 第 {entry.round} 轮</p>
+          {mode === "source" ? <RWSourceTask context={entryContext} entry={entry} modeState={modeState} updateMode={updateMode} autoPlay={autoPlay} /> : null}
+          {mode === "retrieval" ? <RWRetrievalTask context={entryContext} entry={entry} modeState={modeState} updateMode={updateMode} autoPlay={autoPlay} /> : null}
+          {mode === "judge" ? <RWJudgeTask context={entryContext} entry={entry} modeState={modeState} updateMode={updateMode} autoPlay={autoPlay} /> : null}
+          {mode === "application" ? <RWApplicationTask context={entryContext} entry={entry} modeState={modeState} updateMode={updateMode} autoPlay={autoPlay} /> : null}
+        </div>
+        <div className="rw-bottom-nav">
+          <button className="button secondary" disabled={modeState.currentIndex === 0} onClick={goPrevious}>上一题</button>
+          <button className="button primary" disabled={!result?.reviewReady} onClick={goNext}>{modeState.currentIndex >= modeState.queue.length - 1 ? "完成任务" : "下一题"}</button>
+        </div>
+      </section>
+      <ReadingWritingAside mode={mode} context={entryContext} />
+    </main>
+  );
+}
+
+function HighlightSentence({ sentence, target }) {
+  if (!target || !sentence.includes(target)) return <>{sentence}</>;
+  const [before, after] = sentence.split(target);
+  return <>{before}<mark className="rw-target-mark">{target}</mark>{after}</>;
+}
+
+function saveModeResult(modeState, key, entry, patch, correct) {
+  const existing = modeState.results[key] || {};
+  const nextResult = { ...existing, ...patch };
+  return {
+    ...modeState,
+    queue: appendReviewIfNeeded(modeState, entry, correct),
+    visitedHistory: modeState.visitedHistory.includes(modeState.currentIndex)
+      ? modeState.visitedHistory
+      : [...modeState.visitedHistory, modeState.currentIndex],
+    results: { ...modeState.results, [key]: nextResult },
+  };
+}
+
+function RWSourceTask({ context, entry, modeState, updateMode, autoPlay }) {
+  const { item, key } = context;
+  const result = modeState.results[key] || { attempts: 0 };
+  const [audioStatus, setAudioStatus] = useState("ready");
+
+  useEffect(() => {
+    if (autoPlay) speakText(item.sentence, setAudioStatus);
+  }, [autoPlay, item.sentence, entry.round]);
+
+  const choose = (option) => {
+    if (result.reviewReady) return;
+    const attempts = (result.attempts || 0) + 1;
+    const correct = option === item.answer;
+    if (!correct && autoPlay) speakText(item.sentence, setAudioStatus);
+    updateMode((current) => saveModeResult(current, key, entry, {
+      attempts,
+      selected: option,
+      firstCorrect: attempts === 1 && correct,
+      needsReview: !correct,
+      status: correct ? "correct" : attempts >= 2 ? "revealed" : "try_again",
+      reviewReady: correct || attempts >= 2,
+    }, correct));
+  };
+
+  return (
+    <div className="rw-step">
+      <h1>这个色块在句中是什么意思？</h1>
+      <div className="rw-focus-card tone-blue">
+        <p><HighlightSentence sentence={item.sentence} target={item.word} /></p>
+      </div>
+      <button className={`button secondary rw-listen ${audioStatus === "playing" ? "is-playing" : ""}`} onClick={() => speakText(item.sentence, setAudioStatus)}><Icon name="volume" />重听整句</button>
+      <FlatOptions options={item.choices} selected={result.selected} answer={item.answer} locked={result.reviewReady} onChoose={choose} />
+      {result.status === "try_again" ? <FeedbackCard tone="warn" title="先看非目标部分" body={item.nonTargetTranslation} /> : null}
+      {result.reviewReady ? (
+        <ExplanationCard
+          tone={result.status === "correct" ? "good" : "bad"}
+          title={result.status === "correct" ? "答对了，回顾这个用法" : `正确答案：${item.answer}`}
+          example={item.sentence}
+          interpretation={item.translation}
+          target={item.word}
+          meaning={item.answer}
+          collocation={item.collocation}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function RWRetrievalTask({ context, entry, modeState, updateMode, autoPlay }) {
+  const { set, item, key } = context;
+  const result = modeState.results[key] || { wrongSentences: [] };
+  const sentences = useMemo(() => getSentences(set.passage), [set.passage]);
+  const [audioStatus, setAudioStatus] = useState("ready");
+  useEffect(() => {
+    if (autoPlay) speakText(sentences[item.sentenceIndex], setAudioStatus);
+  }, [autoPlay, item.sentenceIndex, sentences]);
+  const choose = (sentenceIndex) => {
+    if (result.reviewReady) return;
+    const correct = sentenceIndex === item.sentenceIndex;
+    updateMode((current) => saveModeResult(current, key, entry, {
+      selectedSentence: sentenceIndex,
+      wrongSentences: correct ? result.wrongSentences || [] : [...(result.wrongSentences || []), sentenceIndex],
+      firstCorrect: result.selectedSentence == null && correct,
+      needsReview: !correct,
+      status: correct ? "correct" : "try_again",
+      reviewReady: correct,
+    }, correct));
+  };
+  return (
+    <div className="rw-step">
+      <h1>{item.task}</h1>
+      <button className={`button secondary rw-listen ${audioStatus === "playing" ? "is-playing" : ""}`} onClick={() => speakText(sentences[item.sentenceIndex], setAudioStatus)}><Icon name="volume" />播放相关句子</button>
+      <div className="rw-reading-grid">
+        {sentences.map((sentence, sentenceIndex) => {
+          const wrong = result.wrongSentences?.includes(sentenceIndex);
+          const selectedCorrect = result.reviewReady && sentenceIndex === item.sentenceIndex;
+          return (
+            <button key={sentence} className={`rw-sentence ${wrong ? "wrong" : ""} ${selectedCorrect ? "target" : ""}`} onClick={() => choose(sentenceIndex)}>
+              <b>{sentenceIndex + 1}</b><span>{sentence}</span>
+              {wrong ? <em>{set.sentenceTranslations?.[sentenceIndex]}</em> : null}
+            </button>
+          );
+        })}
+      </div>
+      {result.reviewReady ? <FeedbackCard tone="good" title="找对了" body={`释义：${set.sentenceTranslations?.[item.sentenceIndex]}`} /> : null}
+    </div>
+  );
+}
+
+function RWJudgeTask({ context, entry, modeState, updateMode, autoPlay }) {
+  const { item, key } = context;
+  const result = modeState.results[key] || { attempts: 0, phase: "meaning" };
+  const [audioStatus, setAudioStatus] = useState("ready");
+  const meaningOptions = item.meaningOptions || [item.meaningAnswer, ...(item.meaningAccepts || []).slice(0, 3)];
+  const roleOptions = item.roleOptions || Object.values(ROLE_LABELS);
+  useEffect(() => {
+    if (autoPlay) speakText(item.sentence, setAudioStatus);
+  }, [autoPlay, item.sentence, entry.round]);
+  const chooseMeaning = (option) => {
+    if (result.phase !== "meaning" || result.reviewReady) return;
+    const attempts = (result.attempts || 0) + 1;
+    const correct = option === item.meaningAnswer;
+    updateMode((current) => saveModeResult(current, key, entry, {
+      attempts,
+      selectedMeaning: option,
+      firstCorrect: attempts === 1 && correct,
+      needsReview: !correct,
+      status: correct ? "meaning_correct" : attempts >= 2 ? "meaning_revealed" : "try_again",
+      phase: correct || attempts >= 2 ? "role" : "meaning",
+    }, correct));
+  };
+  const chooseRole = (option) => {
+    if (result.phase !== "role" || result.reviewReady) return;
+    const correct = option === ROLE_LABELS[item.roleAnswer] || option === item.roleAnswer;
+    updateMode((current) => saveModeResult(current, key, entry, {
+      selectedRole: option,
+      status: correct ? "correct" : "role_wrong",
+      needsReview: result.needsReview || !correct,
+      reviewReady: true,
+    }, correct && !result.needsReview));
+  };
+  return (
+    <div className="rw-step">
+      <h1>判断词块意思和逻辑作用</h1>
+      <div className="rw-focus-card tone-purple">
+        <strong>{item.chunk}</strong>
+        <p><HighlightSentence sentence={item.sentence} target={item.chunk} /></p>
+      </div>
+      <button className={`button secondary rw-listen ${audioStatus === "playing" ? "is-playing" : ""}`} onClick={() => speakText(item.sentence, setAudioStatus)}><Icon name="volume" />播放例句</button>
+      <h2 className="rw-subtitle">1. 选择短语意思</h2>
+      <FlatOptions options={meaningOptions} selected={result.selectedMeaning} answer={item.meaningAnswer} locked={result.phase === "role" || result.reviewReady} onChoose={chooseMeaning} />
+      {result.status === "try_again" ? <FeedbackCard tone="warn" title="先理解非目标部分" body={item.nonTargetTranslation} /> : null}
+      {(result.phase === "role" || result.reviewReady) ? (
+        <>
+          <h2 className="rw-subtitle">2. 判断在例句中的作用</h2>
+          <FlatOptions options={roleOptions} selected={result.selectedRole} answer={ROLE_LABELS[item.roleAnswer]} locked={result.reviewReady} onChoose={chooseRole} />
+        </>
+      ) : null}
+      {result.reviewReady ? (
+        <ExplanationCard
+          tone={result.status === "correct" ? "good" : "bad"}
+          title={`${item.chunk} = ${item.meaningAnswer}`}
+          example={item.sentence}
+          interpretation={item.roleExplanation}
+          target={item.chunk}
+          meaning={item.meaningAnswer}
+          collocation={item.targetChunk}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function RWApplicationTask({ context, entry, modeState, updateMode, autoPlay }) {
+  const { set, item, key } = context;
+  const result = modeState.results[key] || {};
+  const [answer, setAnswer] = useState(result.answer || "");
+  const bank = useMemo(() => getSetChunkBank(set), [set]);
+  const [audioStatus, setAudioStatus] = useState("ready");
+  const minWords = item.minWords || 8;
+  const wordCount = answer.trim().split(/\s+/).filter(Boolean).length;
+  useEffect(() => {
+    if (autoPlay && bank[0]) speakText(bank.map((chunk) => chunk.example).join(". "), setAudioStatus);
+  }, [autoPlay, entry.round, bank]);
+  const insertChunk = (chunk) => setAnswer((value) => `${value}${value.trim() ? " " : ""}${chunk}`);
+  const submit = () => {
+    const used = getUsedChunks(answer, set);
+    const longEnough = wordCount >= minWords;
+    const correct = used.length >= item.minChunks && longEnough;
+    updateMode((current) => saveModeResult(current, key, entry, {
+      answer,
+      usedChunks: used.map((chunk) => chunk.chunk),
+      needsReview: !correct,
+      status: correct ? "correct" : "try_again",
+      reviewReady: true,
+      feedback: used.length < item.minChunks ? "还没有用到目标词块。先点一个色块，再围绕任务背景补完整。" : `篇幅还不够。当前 ${wordCount} 个英文词，至少需要 ${minWords} 个英文词。`,
+    }, correct));
+  };
+  return (
+    <div className="rw-step">
+      <h1>根据背景写一句英文</h1>
+      <div className="rw-application-context"><span>背景</span><p>{item.context}</p></div>
+      <p className="rw-writing-prompt">{item.prompt}</p>
+      <div className="rw-writing-requirement">要求：至少使用 {item.minChunks} 个目标词块；英文不少于 {minWords} 个词。当前 {wordCount} 个词。</div>
+      <button className={`button secondary rw-listen ${audioStatus === "playing" ? "is-playing" : ""}`} onClick={() => speakText(bank.map((chunk) => chunk.example).join(". "), setAudioStatus)}><Icon name="volume" />播放目标表达</button>
+      <div className="rw-chunk-bank">
+        {bank.map((chunk) => (
+          <button key={chunk.chunk} onClick={() => insertChunk(chunk.example)}><span>{chunk.word}</span><strong>{chunk.chunk}</strong><em>{chunk.zh}</em></button>
+        ))}
+      </div>
+      <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} rows="5" placeholder="写一句完整英文，尝试使用上面的色块词块。" />
+      <button className="button primary submit" disabled={!answer.trim()} onClick={submit}>提交并查看反馈</button>
+      {result.reviewReady ? <FeedbackCard tone={result.status === "correct" ? "good" : "warn"} title={result.status === "correct" ? "已完成迁移" : "修改方向"} body={result.status === "correct" ? `已使用：${result.usedChunks.join(" / ")}` : result.feedback} extra={`参考：${item.sample}`} /> : null}
+    </div>
+  );
+}
+
+function FlatOptions({ options, selected, answer, locked, onChoose }) {
+  return (
+    <div className="rw-options">
+      {options.map((option) => (
+        <button key={option} disabled={locked} className={`${selected === option ? "selected" : ""} ${locked && option === answer ? "correct" : ""} ${locked && selected === option && option !== answer ? "wrong" : ""}`} onClick={() => onChoose(option)}>
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function FeedbackCard({ tone, title, body, extra }) {
+  return (
+    <div className={`rw-feedback-card ${tone}`}>
+      <strong>{title}</strong>
+      <p><TextWithBlank text={body} /></p>
+      {extra ? <span>{extra}</span> : null}
+    </div>
+  );
+}
+
+function ExplanationCard({ tone, title, example, interpretation, target, meaning, collocation }) {
+  return (
+    <div className={`rw-feedback-card rw-explanation-card ${tone}`}>
+      <strong>{title}</strong>
+      <dl>
+        <div><dt>词汇</dt><dd>{target}</dd></div>
+        <div><dt>中文</dt><dd>{meaning}</dd></div>
+        {collocation ? <div><dt>搭配</dt><dd>{collocation}</dd></div> : null}
+        <div><dt>例句</dt><dd>{example}</dd></div>
+        <div><dt>释义</dt><dd><TextWithBlank text={interpretation} /></dd></div>
+      </dl>
+    </div>
+  );
+}
+
+function TextWithBlank({ text }) {
+  const parts = String(text || "").split("____");
+  if (parts.length === 1) return text;
+  return (
+    <>
+      {parts.map((part, index) => (
+        <span key={`${part}-${index}`} className="rw-inline-text">
+          {part}
+          {index < parts.length - 1 ? <i className="rw-blank" aria-label="关键词含义空位" /> : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function ReadingWritingAside({ mode, context }) {
+  const bank = getSetChunkBank(context.set);
+  return (
+    <aside className="practice-aside rw-aside">
+      <h2>{MODE_LABELS[mode]}</h2>
+      <p>{RW_MODES.find((item) => item.id === mode)?.body}</p>
+      <div className="rw-mini-bank">
+        <h3>本套词块</h3>
+        {bank.map((item) => <span key={item.chunk}><b>{item.chunk}</b>{item.zh}</span>)}
+      </div>
+    </aside>
+  );
+}
+
+function ReadingWritingCompletedScreen({ metrics, onReport }) {
+  return (
+    <main className="main completion">
+      <section className="completion-card">
+        <div className="completion-check"><Icon name="check" /></div>
+        <h1>阅读写作练习完成</h1>
+        <p>你已经完成当前阅读写作任务，可以查看四个独立任务的学习记录。</p>
+        <div className="completion-stats">
+          <div><strong>{metrics.completedModes}</strong><span>完成任务</span></div>
+          <div><strong>{metrics.modeMetrics.source.completed}</strong><span>认词完成</span></div>
+          <div><strong>{metrics.modeMetrics.judge.completed}</strong><span>判断完成</span></div>
+          <div><strong>{metrics.transferredChunks.length}</strong><span>写句迁移</span></div>
+        </div>
+        <button className="button primary large" onClick={onReport}>查看学习报告</button>
+      </section>
+    </main>
+  );
+}
+
+function ReadingWritingReport({ session, metrics, onRestart, onPractice }) {
+  return (
+    <main className="main report reading-writing-report">
+      <PageHeader title={`${READING_WRITING_TASK.name} · 学习报告`} subtitle="四个任务独立记录，重点看首答、复练和写句迁移。" />
+      <section className="summary-grid">
+        <Metric value={`${metrics.completedModes}/${metrics.totalModes}`} label="完成任务" tone="success" />
+        <Metric value={`${metrics.modeMetrics.source.firstCorrect}/${metrics.modeMetrics.source.total}`} label="认词首答" />
+        <Metric value={`${metrics.modeMetrics.retrieval.completed}/${metrics.modeMetrics.retrieval.total}`} label="检索完成" />
+        <Metric value={`${metrics.transferredChunks.length} 个`} label="迁移词块" tone="warning" />
+      </section>
+      <p className="report-message">
+        {metrics.transferredChunks.length ? `已在写句中调用：${metrics.transferredChunks.join(" / ")}。` : "还没有形成写句迁移，建议从第一套题卡重新练应用。"}
+      </p>
+      <section className="rw-report-list">
+        {RW_MODES.map((mode) => {
+          const stat = metrics.modeMetrics[mode.id];
+          return (
+            <article className="word-group" key={mode.id}>
+              <header><h2>{mode.label}</h2><p>{stat.done ? "已完成" : "进行中"}</p></header>
+              <div className="rw-report-row"><span>完成</span><strong>{stat.completed}/{stat.total}</strong></div>
+              <div className="rw-report-row"><span>首答</span><strong>{stat.firstCorrect}/{stat.total}</strong></div>
+              <div className="rw-report-row"><span>复练</span><strong>{stat.reviewNeeded} 题</strong></div>
+              <div className="rw-report-row"><span>当前</span><strong>{session.modes[mode.id].currentIndex + 1}/{session.modes[mode.id].queue.length}</strong></div>
+            </article>
+          );
+        })}
+      </section>
+      <div className="report-actions">
+        {RW_MODES.map((mode) => <button key={mode.id} className="button primary large" onClick={() => onPractice(mode.id, false)}>继续{mode.label}</button>)}
+        <button className="button secondary large" onClick={onRestart}>重新练习全部题卡</button>
+      </div>
+    </main>
   );
 }
 
